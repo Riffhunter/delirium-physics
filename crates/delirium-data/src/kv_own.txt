@@ -159,7 +159,7 @@
 538 0.2                    # roll-up offset (m)
 140 0.18                   # step slack (m), hand distance
 182 0.15                   # turn probabilities, spin scale
-125 0.06                   # foot-lift threshold (m), torque share [calibrated on our character in the game's own cases against GTA IV, 19 recordings; validated on 27 others, was 0.12]
+125 0.045                  # foot-lift threshold (m), torque share [calibrated v2 on our character against GTA IV's behaviour in 118 recordings (59 fitted, 59 checked), was 0.06]
 547 0.12                   # phase step
 105 0.0894                 # small offsets (m), spine bends (rad) [calibrated on behaviour (Skyrim Delirium's character), was 0.08]
 113 0.0626                 # small offsets (m), damping [calibrated on behaviour, was 0.07]
@@ -182,7 +182,7 @@
 541 50.0                   # shock spin top
 # --- the balancer's foot placement (nmdbm): a PD on the centre of mass, scaled by Delirium's own 1/288 ---
 257 300.0                  # lean gain (and lead)
-258 300.0                  # sideways gain
+258 399                    # sideways gain [calibrated v2 on our character against GTA IV's behaviour in 118 recordings (59 fitted, 59 checked), was 300.0]
 259 60.0                   # sideways integral gain
 261 60.0                   # lean integral gain
 262 0.0039                 # lean output scale (as slot 260) [calibrated on behaviour (Skyrim Delirium's character), was 0.00347222]
