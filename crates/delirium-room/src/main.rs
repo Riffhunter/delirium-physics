@@ -4484,6 +4484,15 @@ fn load(a: &[String], args: &[String], game_dir: Option<&str>, script: VecDeque<
         std::process::exit(2);
     };
     delirium::nmrs::load(nm(), &d);
+    // RoNDelirium: NM_EXPORT=<dir> writes the character file, body and task tuning the SDK needs.
+    let export = std::env::var("NM_EXPORT").ok().map(std::path::PathBuf::from);
+    if let Some(dir) = &export {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::write(dir.join(format!("{xrt}.xrt")), &d);
+        if let Some(tp) = from_game("common.rpf", "data/taskparams.txt") {
+            let _ = std::fs::write(dir.join("taskparams.txt"), tp);
+        }
+    }
     let (build, frames, getup) = match (&bpath, game_dir) {
         (Some(p), _) => {
             let (b, f) = Build::undump(&std::fs::read_to_string(p).unwrap_or_else(|e| panic!("{p}: {e}")));
@@ -4500,6 +4509,16 @@ fn load(a: &[String], args: &[String], game_dir: Option<&str>, script: VecDeque<
     };
     if let Ok(p) = std::env::var("NM_DUMP") {
         let _ = std::fs::write(p, build.dump(&frames));
+    }
+    if let Some(dir) = &export {
+        let _ = std::fs::write(dir.join("build.txt"), build.dump(&frames));
+        // The joints' rest links, derived from the game's idle clip: the SDK reads them back through NM_LINKS.
+        let derived = delirium::nmdbm::DERIVED_LINKS[nm()].get().cloned().unwrap_or_default();
+        println!("NM_EXPORT: {} links", derived.len());
+        let links = derived.iter().map(|q| format!("{} {} {} {}\n", q.x, q.y, q.z, q.w)).collect::<String>();
+        let _ = std::fs::write(dir.join("links.txt"), links);
+        println!("NM_EXPORT: {xrt}.xrt, build.txt, links.txt, taskparams.txt -> {}", dir.display());
+        std::process::exit(0);
     }
     let body = a.iter().position(|x| x == "--body").and_then(|i| a.get(i + 1)).and_then(|n| BODIES.iter().position(|b| b.0 == n)).unwrap_or(1);
     let base = (build, frames);

@@ -2205,6 +2205,57 @@ pub fn task_shot(a: &mut Agent, build: &Build, world: &Collision, tp: &TaskParam
     (t.blind_until != 0).then(|| t.blind_until as f32 * delirium_data::kv!(129))
 }
 
+/// The shot task kept as the game keeps it (RoNDelirium): a hit starts it, or continues it if one's running
+/// (TaskNMShot's next hit), and `shot_task_update` runs it every frame after. `now` in ms.
+#[allow(clippy::too_many_arguments)]
+pub fn shot_task_hit(a: &mut Agent, build: &Build, world: &Collision, tp: &TaskParams, rand: &mut delirium_data::rng::Rand,
+                     task: &mut Option<crate::shottask::ShotTask>, set: &str, hit: Hit, part: usize, at: Vec3, vel: Vec3, normal: Vec3, now: u32) {
+    let next = task.is_some();
+    let msgs = match task.as_mut() {
+        Some(t) => t.next_hit(rand, tp, &hit, now, set, part, at, vel, normal),
+        None => {
+            let mut t = crate::shottask::ShotTask::new(&hit, set, part, at, vel, normal);
+            let m = t.update(rand, tp, &hit, now).msgs;
+            *task = Some(t);
+            m
+        }
+    };
+    let t = task.as_ref().unwrap();
+    let mut st = std::mem::take(&mut a.msgs);
+    if next {
+        a.hold(hit.gun, hit.two_handed);
+    }
+    for m in &msgs {
+        if m.0 == "shot" && a.ch.is_none() {
+            let s = |n: &str, or: f32| tp.get("NMShot_Standing", set, n, or);
+            a.body_balance(build, world, BodyBalance { body_stiffness: s("shotBodyStiffness", delirium_data::kv!(199)), damping: delirium_data::kv!(70), elbow: delirium_data::kv!(13), shoulder: 1.0,
+                                                      max_steps: s("shotMaxSteps", delirium_data::kv!(32)) as u32, spine_stiffness: delirium_data::kv!(27), spine_damping: 1.0 });
+        }
+        crate::shottask::apply(a, build, world, &mut st, std::slice::from_ref(m));
+        if m.0 == "stopAllBehaviours" {
+            a.hold(hit.gun, hit.two_handed);
+        }
+    }
+    a.msgs = st;
+    if let Some(l) = a.lean.as_mut().filter(|_| t.lean_until != 0) {
+        l.2 = t.lean_until as f32 * delirium_data::kv!(129);
+    }
+    a.task_look = t.look.then_some(t.balance);
+}
+
+/// The kept shot task's frame (head look at the attacker, the lean's end); it's dropped when it finishes.
+pub fn shot_task_update(a: &mut Agent, build: &Build, world: &Collision, tp: &TaskParams, rand: &mut delirium_data::rng::Rand,
+                        task: &mut Option<crate::shottask::ShotTask>, hit: Hit, now: u32) {
+    let Some(t) = task.as_mut() else { return };
+    let step = t.update(rand, tp, &hit, now);
+    let mut st = std::mem::take(&mut a.msgs);
+    crate::shottask::apply(a, build, world, &mut st, &step.msgs);
+    a.msgs = st;
+    if step.done {
+        *task = None;
+    }
+}
+
 pub fn task_balance(a: &mut Agent, build: &Build, world: &Collision, tp: &TaskParams, set: &str, look: Option<Vec3>, few_steps: bool) {
     let hit = Hit { attacker_head: look, few_steps, ..Default::default() };
     let mut msgs = vec![("stopAllBehaviours", vec![])];

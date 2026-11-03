@@ -1,6 +1,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 pub mod character;
+pub mod own_char;
 
 use delirium_data::taskparams::TaskParams;
 use delirium::collision::Collision;
@@ -30,6 +31,10 @@ thread_local! {
 static TP: RwLock<Option<TaskParams>> = RwLock::new(None);
 static RAND: std::sync::Mutex<delirium_data::rng::Rand> = std::sync::Mutex::new(delirium_data::rng::Rand { seed: 1 });
 const SHOT_FORCE: f32 = 400.0;
+// The game's weapons (WeaponInfo.xml), for nm_agent_shot's set and bullet force (RoNDelirium).
+static WEAPONS: RwLock<Vec<delirium_data::weapons::Weapon>> = RwLock::new(Vec::new());
+// nm_agent_shot's bullet push: the weapon's force times this (1 = GTA IV's).
+static SHOT_FORCE_SCALE: RwLock<f32> = RwLock::new(1.0);
 
 fn fail(code: i32, why: impl Into<String>) -> i32 {
     ERR.with(|e| *e.borrow_mut() = why.into());
@@ -73,6 +78,45 @@ fn with_tp<R>(f: impl FnOnce(&TaskParams) -> R) -> R {
         Some(tp) => f(tp),
         None => f(&TaskParams::default()),
     }
+}
+
+/// RoNDelirium: which numbers' slots have been read since load, one byte each (1 = read) into `out`; returns how many slots.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nm_debug_kv_used(out: *mut u8, len: i32) -> i32 {
+    let n = delirium_data::kv::USED.len();
+    if !out.is_null() {
+        for i in 0..n.min(len.max(0) as usize) {
+            unsafe { *out.add(i) = delirium_data::kv::USED[i].load(std::sync::atomic::Ordering::Relaxed) as u8 };
+        }
+    }
+    n as i32
+}
+
+/// RoNDelirium: like nm_debug_kv_used, the slots read that our own numbers don't cover.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nm_debug_kv_missing(out: *mut u8, len: i32) -> i32 {
+    let n = delirium_data::kv::MISSING.len();
+    if !out.is_null() {
+        for i in 0..n.min(len.max(0) as usize) {
+            unsafe { *out.add(i) = delirium_data::kv::MISSING[i].load(std::sync::atomic::Ordering::Relaxed) as u8 };
+        }
+    }
+    n as i32
+}
+
+/// RoNDelirium (development): after nm_unlock, our numbers in the slots marked in `mask` (one byte a slot).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nm_debug_override_own(mask: *const u8, len: i32) -> i32 {
+    if mask.is_null() { return 0 }
+    let m = unsafe { std::slice::from_raw_parts(mask, len.max(0) as usize) };
+    delirium_data::kv::override_own(m) as i32
+}
+
+/// RoNDelirium: opens the engine with our own numbers, no game needed; returns how many of the game's slots they cover.
+#[unsafe(no_mangle)]
+pub extern "C" fn nm_unlock_own() -> i32 {
+    delirium_data::LE.store(true, std::sync::atomic::Ordering::Relaxed);  // the PC's byte order (our character files)
+    delirium_data::kv::open_own() as i32
 }
 
 #[unsafe(no_mangle)]
@@ -123,6 +167,9 @@ pub unsafe extern "C" fn nm_unlock(exe_path: *const c_char) -> i32 {
         Ok(d) => d,
         Err(e) => return fail(NM_E_IO, format!("nm_unlock: {e}")),
     };
+    // The PC game's files (fred.art and the rest) are little-endian; the room sets this from its game folder, the SDK didn't.
+    let pc = file.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"));
+    delirium_data::LE.store(pc, std::sync::atomic::Ordering::Relaxed);
     if delirium_data::kv::unlock(&d) { 0 } else { fail(NM_E_STATE, format!("nm_unlock: {p} isn't a version the numbers are read from (the Steam GTAIV.exe or the disc's default.xex)")) }
 }
 
@@ -333,6 +380,60 @@ pub unsafe extern "C" fn nm_build_fit(build: *const NmBuild, joints: *const f32)
     Box::into_raw(Box::new(NmBuild { build, frames }))
 }
 
+/// RoNDelirium: `build` (fitted: its sizes) standing in `pose`'s pose (each part turned as there), joined up through the
+/// fitted anchors from its pelvis. An agent takes the pose it's made in as its muscles' zero (what relaxing blends back
+/// to): made in a skeleton's reference T-pose, a stagger spread its arms out in a cross.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nm_build_with_pose_of(build: *const NmBuild, pose: *const NmBuild) -> *mut NmBuild {
+    let (Some(b), Some(p)) = (unsafe { build.as_ref() }, unsafe { pose.as_ref() }) else {
+        fail(NM_E_ARG, "nm_build_with_pose_of: null build");
+        return std::ptr::null_mut();
+    };
+    if b.frames.len() != p.frames.len() {
+        fail(NM_E_ARG, "nm_build_with_pose_of: not the same body");
+        return std::ptr::null_mut();
+    }
+    let mut out: Vec<Transform> = p.frames.iter().map(|f| Transform::from_rotation(f.rotation)).collect();
+    out[0].translation = b.frames[0].translation;
+    for c in 1..out.len() {
+        if let Some(q) = b.build.parts[c].parent {
+            let at = out[q].translation + out[q].rotation * b.build.parts[c].anchor_parent;
+            out[c].translation = at - out[c].rotation * b.build.parts[c].anchor;
+        }
+    }
+    Box::into_raw(Box::new(NmBuild { build: b.build.clone(), frames: out }))
+}
+
+/// RoNDelirium: `build` (fitted) with the parts in `mask` (bit k: part k) turned on their parents as in `pose` (the
+/// character's own pose: those joints at their zero) and the rest as fitted, joined up from the pelvis through the
+/// fitted anchors. Fitted to a skeleton, the trunk's joints were bent far past their limits (a spine 3-8 times over),
+/// and the first frame of any reaction snapped them back: the whole upper body turned as one block.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nm_build_with_joints_of(build: *const NmBuild, pose: *const NmBuild, mask: u32) -> *mut NmBuild {
+    let (Some(b), Some(p)) = (unsafe { build.as_ref() }, unsafe { pose.as_ref() }) else {
+        fail(NM_E_ARG, "nm_build_with_joints_of: null build");
+        return std::ptr::null_mut();
+    };
+    if b.frames.len() != p.frames.len() {
+        fail(NM_E_ARG, "nm_build_with_joints_of: not the same body");
+        return std::ptr::null_mut();
+    }
+    let n = b.frames.len();
+    let mut out = b.frames.clone();
+    for c in 0..n {
+        let Some(q) = b.build.parts[c].parent else {
+            if mask & 1 != 0 { out[0].rotation = p.frames[0].rotation; }
+            continue;
+        };
+        let from = if mask & (1 << c) != 0 { &p.frames } else { &b.frames };
+        let rel = from[q].rotation.inverse() * from[c].rotation;
+        out[c].rotation = (out[q].rotation * rel).normalize();
+        let at = out[q].translation + out[q].rotation * b.build.parts[c].anchor_parent;
+        out[c].translation = at - out[c].rotation * b.build.parts[c].anchor;
+    }
+    Box::into_raw(Box::new(NmBuild { build: b.build.clone(), frames: out }))
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nm_build_part_frame(b: *const NmBuild, i: i32, pos: *mut f32, rot: *mut f32) -> i32 {
     let Some(f) = (unsafe { b.as_ref() }).and_then(|b| b.frames.get(i as usize)) else { return fail(NM_E_ARG, "no such part") };
@@ -349,6 +450,9 @@ pub struct NmAgent {
     mode: i32,
     set: Vec<bool>,
     pending: Option<(String, Vec<(String, Value)>)>,
+    shot: Option<delirium::shottask::ShotTask>,  // nm_agent_shot's task, kept across hits and frames
+    ms: f64,                                      // the agent's clock (ms), for the shot task's timers
+    rand: delirium_data::rng::Rand,               // its own random numbers: an agent's reactions don't depend on the others' (a recording replays)
 }
 
 fn placed(b: &NmBuild, pos: Vec3, yaw: f32) -> Vec<Transform> {
@@ -356,6 +460,36 @@ fn placed(b: &NmBuild, pos: Vec3, yaw: f32) -> Vec<Transform> {
     let r = b.frames[0].translation.with_z(floor);
     let turn = Quat::from_rotation_z(yaw);
     b.frames.iter().map(|f| Transform::from_translation(pos + turn * (f.translation - r)).with_rotation(turn * f.rotation)).collect()
+}
+
+/// Each new agent's random numbers start from the next of the DLL's: different agents, different reactions.
+fn next_seed() -> delirium_data::rng::Rand {
+    let mut r = RAND.lock().unwrap_or_else(|e| e.into_inner());
+    r.next();
+    delirium_data::rng::Rand::new(r.seed)
+}
+
+/// Diagnosis: for each of n parts' joints, the most since the last call of: swing's share of its limit, twist's,
+/// the hard limit's torque, the soft limit's torque (4 floats each); then cleared.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nm_debug_trace(out: *mut f32, n: i32) -> i32 {
+    if out.is_null() || n <= 0 { return fail(NM_E_ARG, "nm_debug_trace: no buffer") }
+    delirium::ragdoll::TRACE.with(|t| {
+        let mut t = t.borrow_mut();
+        for k in 0..(n as usize).min(t.len()) {
+            for i in 0..4 { unsafe { *out.add(4 * k + i) = t[k][i] } }
+            t[k] = [0.0; 4];
+        }
+    });
+    0
+}
+
+/// The agent's random numbers from this seed (a recording sets it, and its replay sets it again).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nm_agent_set_seed(a: *mut NmAgent, seed: u32) -> i32 {
+    let Some(a) = (unsafe { a.as_mut() }) else { return fail(NM_E_ARG, "null agent") };
+    a.rand = delirium_data::rng::Rand::new(seed);
+    0
 }
 
 #[unsafe(no_mangle)]
@@ -372,7 +506,7 @@ pub unsafe extern "C" fn nm_agent_create(b: *const NmBuild, pos: *const f32, yaw
     let frames = placed(b, pos, yaw);
     let agent = Agent::new(&b.build, Ragdoll::new(&b.build, &frames, Vec3::ZERO), Quat::from_rotation_z(yaw), seed);
     let n = frames.len();
-    Box::into_raw(Box::new(NmAgent { agent, build: b.build.clone(), mode: NM_MODE_LEAD, set: vec![false; n], pending: None }))
+    Box::into_raw(Box::new(NmAgent { agent, build: b.build.clone(), mode: NM_MODE_LEAD, set: vec![false; n], pending: None, shot: None, ms: 0.0, rand: next_seed() }))
 }
 
 #[unsafe(no_mangle)]
@@ -414,6 +548,7 @@ pub unsafe extern "C" fn nm_agent_step(a: *mut NmAgent, w: *const NmWorld, dt: f
     } else {
         a.agent.step(&a.build, &w.0, dt, &w.1, &[]);
     }
+    a.ms += dt as f64 * 1000.0;
     a.set.fill(false);
     0
 }
@@ -925,7 +1060,7 @@ pub unsafe extern "C" fn nm_agent_task_shot(a: *mut NmAgent, w: *const NmWorld, 
     let set = unsafe { text(set) }.unwrap_or("*");
     let hit = nm::Hit { health, ..nm::Hit::ragdoll(&a.agent) };
     let dir = unsafe { v3(dir) }.normalize_or_zero();
-    with_tp(|tp| nm::task_shot(&mut a.agent, &a.build, &w.0, tp, &mut RAND.lock().unwrap_or_else(|e| e.into_inner()), set, hit, part as usize,
+    with_tp(|tp| nm::task_shot(&mut a.agent, &a.build, &w.0, tp, &mut a.rand, set, hit, part as usize,
                                unsafe { v3(at) }, dir * SHOT_FORCE, -dir, false));
     0
 }
@@ -956,6 +1091,82 @@ pub unsafe extern "C" fn nm_agent_task_flinch(a: *mut NmAgent, w: *const NmWorld
         return fail(NM_E_ARG, "null vector");
     }
     let set = unsafe { text(set) }.unwrap_or("*");
-    with_tp(|tp| nm::task_flinch(&mut a.agent, &a.build, &w.0, tp, &mut RAND.lock().unwrap_or_else(|e| e.into_inner()), set, unsafe { v3(from) }));
+    with_tp(|tp| nm::task_flinch(&mut a.agent, &a.build, &w.0, tp, &mut a.rand, set, unsafe { v3(from) }));
+    0
+}
+
+/* RoNDelirium: the shot task as GTA IV runs it. */
+
+/// The game's WeaponInfo.xml (common/data on PC): each weapon's shot set and bullet force for nm_agent_shot.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nm_load_weapons(path: *const c_char) -> i32 {
+    let Some(p) = (unsafe { text(path) }) else { return fail(NM_E_ARG, "nm_load_weapons: no path") };
+    match std::fs::read_to_string(p) {
+        Ok(t) => {
+            let w = delirium_data::weapons::read(&t);
+            let n = w.len() as i32;
+            *WEAPONS.write().unwrap_or_else(|e| e.into_inner()) = w;
+            n
+        }
+        Err(e) => fail(NM_E_IO, format!("{p}: {e}")),
+    }
+}
+
+fn shot_hit(a: &NmAgent, health: f32, attacker_head: *const f32) -> nm::Hit {
+    let head = (!attacker_head.is_null()).then(|| unsafe { v3(attacker_head) });
+    nm::Hit { health, dying: health <= 0.0, attacker_head: head, attacker_neck: head, ..nm::Hit::ragdoll(&a.agent) }
+}
+
+/// A bullet hit, as the game's TaskNMShot takes it: the weapon (a WeaponInfo.xml name, e.g. "M4"; NULL or unknown for
+/// the defaults) picks the reaction's set and the bullet's push; a running task carries on (its next hit) instead of
+/// starting over. `at` the hit (world), `dir` the bullet's way, `health` the ped's (GTA's 100-200; lower is weaker),
+/// `attacker_head` where the shooter's head is (NULL: no look). Call nm_agent_shot_update every frame after.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nm_agent_shot(a: *mut NmAgent, w: *const NmWorld, weapon: *const c_char, part: i32, at: *const f32, dir: *const f32,
+                                       health: f32, attacker_head: *const f32) -> i32 {
+    let a = agent!(a);
+    let Some(w) = (unsafe { w.as_ref() }) else { return fail(NM_E_ARG, "null world") };
+    if at.is_null() || dir.is_null() || !(0..a.build.parts.len() as i32).contains(&part) {
+        return fail(NM_E_ARG, "bad hit");
+    }
+    let name = unsafe { text(weapon) }.unwrap_or("");
+    let weapons = WEAPONS.read().unwrap_or_else(|e| e.into_inner());
+    let found = weapons.iter().find(|x| x.name.eq_ignore_ascii_case(name));
+    let set = found.map_or("*", |x| nm::weapon_set(x, 3)).to_string();
+    let force = found.map_or(SHOT_FORCE * 0.1, |x| x.force) * *SHOT_FORCE_SCALE.read().unwrap_or_else(|e| e.into_inner());
+    drop(weapons);
+    let at = unsafe { v3(at) };
+    let d = unsafe { v3(dir) }.normalize_or_zero();
+    let back = delirium_data::kv!(5);
+    let vel = delirium::shottask::bullet(at, at - d * back, force);
+    let mut st = std::mem::take(&mut a.agent.msgs);
+    let _ = msg::send(&mut a.agent, &a.build, &w.0, &mut st, "applyImpulse",
+                      &[("partIndex", Value::Int(part)), ("hitPoint", Value::Vec3(at)), ("impulse", Value::Vec3(vel))]);
+    a.agent.msgs = st;
+    let hit = shot_hit(a, health, attacker_head);
+    let now = a.ms as u32;
+    with_tp(|tp| nm::shot_task_hit(&mut a.agent, &a.build, &w.0, tp, &mut a.rand, &mut a.shot, &set, hit,
+                                   part as usize, at, vel, -d, now));
+    0
+}
+
+/// The shot task's frame (look at the shooter, the lean's end): every frame while it runs. 1 while it runs, 0 when done.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nm_agent_shot_update(a: *mut NmAgent, w: *const NmWorld, health: f32, attacker_head: *const f32) -> i32 {
+    let a = agent!(a);
+    let Some(w) = (unsafe { w.as_ref() }) else { return fail(NM_E_ARG, "null world") };
+    let hit = shot_hit(a, health, attacker_head);
+    let now = a.ms as u32;
+    with_tp(|tp| nm::shot_task_update(&mut a.agent, &a.build, &w.0, tp, &mut a.rand, &mut a.shot, hit, now));
+    if a.shot.is_some() { 1 } else { 0 }
+}
+
+/// nm_agent_shot's bullet push: each weapon's force times `scale` (1 = GTA IV's own).
+#[unsafe(no_mangle)]
+pub extern "C" fn nm_set_shot_force_scale(scale: f32) -> i32 {
+    if !(scale >= 0.0) {
+        return fail(NM_E_ARG, "nm_set_shot_force_scale: scale >= 0");
+    }
+    *SHOT_FORCE_SCALE.write().unwrap_or_else(|e| e.into_inner()) = scale;
     0
 }

@@ -1152,6 +1152,13 @@ fn twist_limit(st: &crate::rigid::Swing, twist: f32) -> Option<f32> {
     if !(st.twist - l < 0.0) { Some(l) } else if !(l + st.twist > 0.0) { Some(-l) } else { None }
 }
 pub const SUBSTEPS: usize = 2;
+
+// Diagnosis (nm_debug_trace): per joint, the most of each since it was last read: its swing's share of the limit (1 at
+// it), its twist's, the hard limit's torque, the soft limit's torque.
+thread_local! { pub static TRACE: std::cell::RefCell<Vec<[f32; 4]>> = std::cell::RefCell::new(vec![[0.0; 4]; 32]); }
+pub fn trace(k: usize, i: usize, v: f32) {
+    TRACE.with(|t| { let mut t = t.borrow_mut(); if k < t.len() && v.is_finite() { t[k][i] = t[k][i].max(v); } });
+}
 #[allow(non_snake_case)]
 #[inline]
 fn GHOST() -> f32 { delirium_data::kv!(57) }
@@ -1670,6 +1677,7 @@ impl Ragdoll {
                 (DMat3::from_cols(cols[0], cols[1], cols[2]).inverse() * world.as_dvec3()).as_vec3()
             };
             if t != Vec3::ZERO {
+                trace(i, 3, t.length());
                 pair(joints, i, t.as_dvec3(), lt);
                 out[i] += t;
             }
@@ -1687,6 +1695,7 @@ impl Ragdoll {
                 Kind::Hinge { lo, hi } => {
                     let (lo, hi) = hinge_limits(lo, hi);
                     let (a, n) = (crate::rigid::hinge(&j.jc, &pl, &cl), crate::rigid::hinge_axis(&j.jc, &cl));
+                    trace(k, 0, if a > (lo + hi) * 0.5 { 0.5 + (a - (lo + hi) * 0.5) / (hi - lo).max(1e-3) } else { 0.5 - (a - (lo + hi) * 0.5) / (hi - lo).max(1e-3) });
                     let (oh, ol) = (a - hi, a - lo);
                     if !(oh > 0.0) && ol >= 0.0 {
                         continue;
@@ -1705,11 +1714,18 @@ impl Ragdoll {
                     };
                     let r = sdot(n, artic.answer(k, n), b"yzx");
                     let t = -((if r != 0.0 { 1.0 / r } else { delirium_data::kv!(3) }) * LIMIT_GAIN() * f);
+                    trace(k, 2, t.abs());
                     pair(joints, k, (n * t).as_dvec3(), lt);
                     continue;
                 }
                 Kind::Ball { lean, twist } => {
                     let st = crate::rigid::swing3(&j.jc, &pl, &cl);
+                    {
+                        let [l0, l1] = lean.map(|l| (l - LIMIT_MARGIN()).max(0.0).max(delirium_data::kv!(68)));
+                        let (c1, c0) = (sdot(st.s, crate::rigid::col(&st.pr, 1), b"yxz") / l0, sdot(st.s, crate::rigid::col(&st.pr, 0), b"yxz") / l1);
+                        trace(k, 0, (c0.fma(c0, c1 * c1) * st.theta * st.theta).sqrt());
+                        trace(k, 1, st.twist.abs() / (twist - LIMIT_MARGIN()).max(1e-3));
+                    }
                     if let Some(lim) = lean_limit(&st, lean) {
                         let (over, ls) = (st.theta - lim, speed(st.s));
                         let f = (if ls >= 0.0 { 0.0 } else { ls }).fma(h, over);
@@ -1754,6 +1770,7 @@ impl Ragdoll {
                 }
             };
             if t != Vec3::ZERO {
+                trace(k, 2, t.length());
                 pair(joints, k, t.as_dvec3(), lt);
             }
         }

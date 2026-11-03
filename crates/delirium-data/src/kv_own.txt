@@ -1,0 +1,194 @@
+# RoNDelirium's own numbers for the slots Delirium otherwise reads from GTA IV's program. Written for this fork from
+# what each slot does in this code (its uses: the catalogue in RoNDelirium's NOTES.md); none is taken from any game.
+# Format: slot value  # why. A slot with no line here reads 0 and is flagged (nm_debug_kv_missing).
+#
+# --- maths: exact by definition ---
+812 -0.16666666666666666   # sin series (mathrt): r - r^3/6 + ..., the cubic term
+813 3.141592653589793      # pi (atan2, acos)
+814 1.5707963267948966     # pi/2: atan2 on the y axis, its quadrant table [0, pi/6, pi/2, pi/3]
+525 1.4142135623730951     # sqrt 2: quat_rows builds 1-2(yy+zz) from (sqrt2 q)
+568 0.08333333333333333    # box inertia per unit mass: (b^2+c^2)/12 from full extents
+569 1.3333333333333333     # capsule mass: r^2 (l + 4/3 r)
+570 1.0666666666666667     # capsule axial inertia: r^2/2 (l + 16/15 r) / (l + 4/3 r)
+550 0.3333333333333333     # capsule transverse inertia: (l^3/4 + 2.25 l r^2 + 1.6 r^3 + l^2 r)/3 / (l + 4/3 r)
+17 0.25                    # ... its l^3 coefficient (also: short times, small amplitudes, tolerances)
+134 2.25                   # ... its l r^2 coefficient (also the hands' friction)
+487 1.6                    # ... its r^3 coefficient (also angles in rad: about 92 degrees)
+576 0.3333333333333333     # spin energy: 1/2 w^2 (trace of the inertia / 3)
+31 9.81                    # gravity, m/s^2
+# --- the GJK search directions (gjk.rs SPHERE): unit icosphere, icosahedron poles on z plus edge midpoints ---
+144 0.723606798
+145 0.525731112
+146 0.447213595
+147 0.276393202
+148 0.850650808
+149 0.894427191
+150 0.447213595
+151 0.447213595
+152 0.425325404
+153 0.309016994
+154 0.850650808
+155 0.162459848
+156 0.5
+157 0.262865556
+158 0.809016994
+159 0.525731112
+160 0.850650808
+161 0.525731112
+162 0.525731112
+163 0.850650808
+164 0.68819096
+165 0.5
+166 0.951056516
+167 0.309016994
+168 0.587785252
+169 0.809016994
+# --- random numbers: standard generators ---
+878 214013                 # LCG multiplier (the common C library one)
+879 2531011                # LCG increment
+563 32767                  # 15-bit draw from the LCG (bits 16-30)
+187 4294957665             # multiply-with-carry multiplier (Marsaglia's 32-bit)
+185 8388607                # 23-bit mask: draws / 2^23 (Delirium's own 23 in slot 99)
+528 8388608.0              # 2^23: a 23-bit draw to [0,1)
+529 2147483647             # 31-bit mask
+526 4294967295             # seed mask (all bits)
+50 65535                   # 16-bit mask / u16 cell clamp
+880 1.5259021896696422e-05 # 1/65535: a 16-bit draw to [0,1]
+521 2.3283064365386963e-10 # 1/2^32: a 32-bit draw to [0,1)
+249 3.5762786865234375e-08 # 0.3 / 2^23: clavicle lean from a 23-bit draw
+979 9999                   # most ammo a weapon may list
+# --- units ---
+78 1000.0                  # ms per second
+129 0.001                  # seconds per ms
+80 60.0                    # NM's update rate (Hz): substeps a frame = dt * 60 * 2 (also: long probes, m)
+196 120.0                  # the balancer's rate (Hz): two substeps a 60 Hz frame
+28 100.0                   # percent (relaxation 0-100 to 0-1; full health)
+15 100.0                   # a ped's health; a soft limit's stiffness
+# --- numerical tolerances ---
+3 0.0                      # 1/x where x is 0: nothing
+4 1e-06                    # tiny: kept off a zero denominator
+47 1e-06                   # squared length taken as zero
+66 1e-06                   # effective mass / step taken as zero
+245 1e-06                  # denominator guard
+251 1e-06                  # squared cross product taken as zero
+571 1e-06                  # matrix inverse tolerance (relative)
+572 1e-06                  # matrix regularisation (relative)
+580 1e-06                  # singular 3x3 (relative)
+71 1e-08                   # degenerate triangle area
+68 0.0001                  # small guard (also GJK degenerate length^2)
+48 0.001                   # small guard on divisions by a lean, time or angle
+524 0.001                  # spin below this: no turn
+67 0.999                   # two normals this parallel are the same plane
+264 0.9999                 # leg length ratio's top for acos
+65 4.0                     # squared margins: twice the margin apart
+69 10000.0                 # bounds this big are broken (also 10 s in ms)
+575 1e+09                  # "nothing yet" for a nearest / least search
+38 40                      # GJK iterations at most; balance countdown in frames
+# --- the ragdoll's world ---
+128 0.016                  # collision margin (m) [calibrated on behaviour (Skyrim Delirium's character), was 0.025]
+567 0.03                   # world contact margin (m); squared spin to sleep [calibrated on our character in the game's own cases against GTA IV, 19 recordings; validated on 27 others, was 0.04]
+573 0.01                   # penetration let pass (m)
+574 0.09                   # a contact held this far off is dropped (m) [calibrated on the game's own cases against GTA IV, 4 recordings, was 0.12]
+578 0.01                   # contact distance taken as touching (m)
+556 0.65                   # most a body moves in a substep (m)
+579 0.785398               # most a body turns in a substep (rad)
+59 50                     # fastest a body may go (m/s); shock spin's top [calibrated on behaviour (Skyrim Delirium's character), was 32]
+126 0.0384                 # joint limit margin (rad); small offsets (m) [calibrated on behaviour, was 0.06]
+62 1.6                     # eye height (m)
+63 0.16                    # the walker's foot radius (m); small angles (rad) [calibrated on our character in the game's own cases against GTA IV, 19 recordings; validated on 27 others, was 0.32]
+64 0.0559                 # small heights / thresholds (m) [calibrated on behaviour (Skyrim Delirium's character), was 0.0447]
+61 1.792                  # most substeps a frame; ground cell (m); a few rad/s [calibrated on behaviour (Skyrim Delirium's character), was 3.5]
+54 0.4                     # moving speed (m/s)
+74 1.2                     # second probe height (m); spin threshold (rad/s)
+70 0.7                     # a wall: |n.z| under this; dot thresholds; damping
+# --- the pool of tuning values the behaviours share (stiffness on a 0-16 scale, damping 0-1, s, m, rad) ---
+32 6.0                     # quintic smootherstep 6t^5-15t^4+10t^3; a light stiffness
+26 15.0                    # ... 15; the stiffest clamp
+27 8                      # ... 10; the usual body stiffness [calibrated on behaviour (Skyrim Delirium's character), was 10]
+5 3.0                      # stay-upright stiffness (the feet stabiliser squares it: 8 kicked the feet out); far target (m)
+21 9.6                    # firm limb stiffness; a top recoverable speed (m/s) [calibrated on behaviour (Skyrim Delirium's character), was 12]
+11 14.0                    # ankle / grab stiffness; hip twist loosening (deg)
+121 14.5                   # aiming / controller stiffness
+131 10.5                   # balance / foetal / torso stiffness
+199 16.5                   # stiffness while shot on their feet [calibrated on our character in the game's own cases against GTA IV, 19 recordings; validated on 27 others, was 8.25]
+111 7.6                    # head look / flinch stiffness [calibrated on behaviour, was 9.5]
+190 7.2                    # writhing stiffness [calibrated on behaviour, was 9]
+191 13.0                   # windmilling arms' stiffness
+133 10.24                  # muscle strength top [calibrated on behaviour (Skyrim Delirium's character), was 16]
+136 20.0                   # speed clamp top so (20-5)/15 spans 0-1; max acceleration
+29 7.0                     # neck / elbow / pedalling stiffness; noise rate
+60 6.25                   # trunk stiffness; a few rad/s; clamp top [calibrated on behaviour, was 5]
+108 2                      # speeds (m/s), rates, clavicle stiffness, decay [calibrated on our character in the game's own cases against GTA IV, 19 recordings; validated on 27 others, was 4.0]
+30 3.0                     # rates (rad/s), timers (s)
+12 1.995                   # timers (s), reach angle (rad) [calibrated on our character in the game's own cases against GTA IV, 19 recordings; validated on 27 others, was 1.5]
+193 1.3                    # arm-slowing amount, scale
+198 1.25                   # bend (rad), leg spin (rad/s), fling time (s)
+181 1.9                    # elbow angle on contact (rad)
+173 1.15                   # reach angle (rad)
+255 1.1                    # angle clamp (rad)
+263 1.1                    # step lift divisor
+13 0.9                     # elbow bend, hold timer (s)
+518 2.875                  # share of a joint limit used [calibrated on the game's own cases against GTA IV, 4 recordings, was 1.4375; first 0.92]
+243 0.95                   # cut-offs
+112 0.87                   # forward arm offset, dot thresholds
+232 1.0625                 # arm share of stiffness, knee [calibrated on behaviour (Skyrim Delirium's character), was 0.85]
+558 0.8                    # knee scale while shot
+20 1.5625                 # dot / probability thresholds, damping, distances (m) [calibrated on behaviour, was 0.8]
+18 0.75                    # damping, torso share, offsets (m)
+557 0.7                    # reach share
+174 0.68                   # arm reach, damping factor
+499 0.65                   # twist top
+114 0.6                    # damping, arms up, dot thresholds
+127 0.55                   # reach down (m), back bend
+246 0.55                   # catch-fall probe (m)
+536 0.6                    # roll-up arm angle
+8 0.45                     # brace distance (m)
+517 0.45                   # head look turn share
+247 0.42                   # time clamp (s)
+9 0.532                    # leans, probabilities, small gains [calibrated on the game's own cases against GTA IV, 4 recordings, was 0.4]
+135 0.38                   # wave size, aim angle (rad)
+35 0.35                    # distances (m), twist (rad), grip
+227 0.33                   # reach absorb time (s), lean clamp
+545 0.35                   # since-hit wait (s)
+57 0.3                     # probe radius (m), leans, offsets
+544 0.3                    # shot timing (s)
+183 0.28                   # arms-out lean
+537 0.25                   # roll-up lift
+110 0.25                   # times (s), drops (m), damping gains
+24 0.2                     # small offsets (m), times (s), scales
+538 0.2                    # roll-up offset (m)
+140 0.18                   # step slack (m), hand distance
+182 0.15                   # turn probabilities, spin scale
+125 0.06                   # foot-lift threshold (m), torque share [calibrated on our character in the game's own cases against GTA IV, 19 recordings; validated on 27 others, was 0.12]
+547 0.12                   # phase step
+105 0.0894                 # small offsets (m), spine bends (rad) [calibrated on behaviour (Skyrim Delirium's character), was 0.08]
+113 0.0626                 # small offsets (m), damping [calibrated on behaviour, was 0.07]
+73 0.032                   # small times (s), offsets (m), damping [calibrated on our character in the game's own cases against GTA IV, 19 recordings; validated on 27 others, was 0.064]
+197 0.05                   # balance lean bias (rad)
+278 0.4688                 # stabiliser velocity share [calibrated on behaviour, was 0.3]
+532 0.2048                 # roll-up scale [calibrated on behaviour (Skyrim Delirium's character), was 0.4]
+534 2.5                    # roll-up spin threshold (rad/s)
+535 3.141592653589793      # roll-up legs out of phase
+539 3.0                    # roll-up ramp gain
+530 9.8175                 # roll-up rate base (rad/s), phase range [calibrated on behaviour, was 6.28319]
+239 10.0                   # noise time offset range (s)
+275 0.8594                 # ankle angle clamp (rad) [calibrated on behaviour (Skyrim Delirium's character), was 0.55]
+45 500.0                   # blind-fire time low (ms), push threshold
+171 750                    # time to stop leaning low (ms) [calibrated on behaviour (Skyrim Delirium's character), was 600]
+583 1500.0                 # ... high (ms)
+58 3000                    # shot task's time on the ground / slow (ms)
+143 5000                   # ... otherwise (ms)
+76 45.0                    # relaxation (%), knee loosening (deg), accel clamp (m/s^2), shock spin low
+541 50.0                   # shock spin top
+# --- the balancer's foot placement (nmdbm): a PD on the centre of mass, scaled by Delirium's own 1/288 ---
+257 300.0                  # lean gain (and lead)
+258 300.0                  # sideways gain
+259 60.0                   # sideways integral gain
+261 60.0                   # lean integral gain
+262 0.0039                 # lean output scale (as slot 260) [calibrated on behaviour (Skyrim Delirium's character), was 0.00347222]
+# --- found by the own-numbers runs (paths the game's numbers never took in the first catalogue) ---
+186 4294967295             # multiply-with-carry: the low 32 bits
+188 0.12                   # the foot's support radius (m): a step when the centre of mass leaves it
+189 0.3                    # a balance step's duration (s)
+120 0.15                   # small offsets (m), the spine's pain bend (rad)
+228 3.5                    # fastest a hand reaches to grab (m/s)

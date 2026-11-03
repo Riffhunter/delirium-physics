@@ -9,6 +9,10 @@ publish.workspace = true
 name = "delirium_physics"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Skyrim Delirium's character built in (NM_SKYRIMCHAR=1), for the developer's comparisons; releases leave it out.
+skyrim-char = []
+
 [dependencies]
 delirium = { path = "../delirium" }
 delirium-data = { path = "../delirium-data" }
