@@ -399,6 +399,18 @@ pub(crate) fn game_pairs(pairs: impl Iterator<Item = (usize, usize)>) -> Vec<(us
 }
 
 impl Agent {
+    /// Diagnosis (RoNDelirium): which of the optional behaviours run, as a bit mask (see debug_active's order).
+    pub fn debug_active(&self) -> u32 {
+        [self.catch_fall.is_some(), self.flinch.is_some(), self.writhe.is_some(), self.windmill.is_some(), self.pedal.is_some(),
+         self.roll_up.is_some(), self.brace.is_some(), self.nm_shot_started.is_some(), self.held.is_some(), !self.eff_override.is_empty()]
+            .iter().enumerate().map(|(i, &on)| (on as u32) << i).sum()
+    }
+
+    /// Diagnosis (RoNDelirium): each joint's effector: desired angles (3), zero (3), strength.
+    pub fn debug_effectors(&self) -> Vec<[f32; 7]> {
+        self.ch.as_ref().map_or_else(Vec::new, |c| c.eff.iter().map(|e| [e.desired[0], e.desired[1], e.desired[2], e.zero[0], e.zero[1], e.zero[2], e.strength]).collect())
+    }
+
     pub fn limp_rage(&self) -> Vec<crate::ragdoll::Rigid> {
         let mut rigid = self.ch.as_ref().map_or(vec![], |ch| ch.rigid(1.0 / delirium_data::kv!(196), self.strength, self.most));
         rigid.iter_mut().for_each(|r| (r.max, r.gain) = ([0.0; 2], [0.0; 2]));

@@ -1,3 +1,12 @@
+// RoNDelirium: the shot's body stiffness set by the game for the next shots (a dying body's lower: held at the usual,
+// the roll-up on the floor pulled the arms in at full strength and the hands ended at the neck). 0: the usual.
+static BODY_STIFFNESS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub fn set_body_stiffness_override(k: f32) { BODY_STIFFNESS.store(k.max(0.0).to_bits(), std::sync::atomic::Ordering::Relaxed); }
+fn body_stiffness_override() -> Option<f32> {
+    let k = f32::from_bits(BODY_STIFFNESS.load(std::sync::atomic::Ordering::Relaxed));
+    (k > 0.0).then_some(k)
+}
+
 use crate::collision::Collision;
 use crate::msg::{self, Value};
 use crate::nm::{Agent, Hit};
@@ -89,7 +98,7 @@ impl ShotTask {
         }
         p.extend([("crouching", B(false)), ("reachForWound", B(!melee)), ("fling", B(false)), ("chickenArms", B(false)),
                   ("maxSteps", I(if hit.few_steps { delirium_data::kv!(1 int) } else { st("shotMaxSteps", delirium_data::kv!(32)) as i32 })), ("loosenessAmount", F(st("shotLooseness", 1.0))),
-                  ("bodyStiffness", F(st("shotBodyStiffness", delirium_data::kv!(199)))), ("stableHandsAndNeck", B(st("shotStablizeHandsAndNeck", 0.0) != 0.0))]);
+                  ("bodyStiffness", F(match body_stiffness_override() { Some(k) => k, None => st("shotBodyStiffness", delirium_data::kv!(199)) })), ("stableHandsAndNeck", B(st("shotStablizeHandsAndNeck", 0.0) != 0.0))]);
         let mut lh = |n: &str, l: f32, h: f32| rand.float_in_range(st(&format!("{n}L"), l), st(&format!("{n}H"), h));
         p.push(("timeBeforeReachForWound", F(lh("shotTimeBeforeReachForWound", delirium_data::kv!(73), delirium_data::kv!(57)))));
         p.push(("timeBeforeCollapseWoundLeg", F(st("shotTimeBeforeCollapseWoundLeg", 1.0))));

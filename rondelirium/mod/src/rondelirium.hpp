@@ -85,6 +85,9 @@ namespace rondelirium
         bool log = true;
         bool record = true;        // each activation written to recordings/ (tools/recstats.py, replay.py, recviewer.html)
         int record_keep = 300;     // the newest this many kept (marked ones always)
+        // The shot reaction's body stiffness for a dying body (0: the same as alive). The usual one, calibrated on the
+        // living, curled the dying into a ball with the arms pulled in at full strength: the hands ended at the neck.
+        float dying_stiffness = 6.0f;
         bool trunk_at_zero = false;  // after the fit, the trunk's joints at their zero (for Skyrim Delirium's character, NM_SKYRIMCHAR)
     };
     inline Settings cfg;
@@ -135,6 +138,7 @@ namespace rondelirium
             else if (key == "log") cfg.log = v != 0;
             else if (key == "record") cfg.record = v != 0;
             else if (key == "record_keep") cfg.record_keep = std::max(int(v), 10);
+            else if (key == "dying_stiffness") cfg.dying_stiffness = std::max(v, 0.0f);
             else if (key == "trunk_at_zero") cfg.trunk_at_zero = v != 0;
         }
     }
@@ -626,6 +630,7 @@ namespace rondelirium
         note(a, "end " + narrow(why));
         nm::tape::on.erase(a.agent);
         nm::tape::on.erase(a.world);
+        nm::tape::stiff_written.erase(a.tape.get());
         std::error_code ec;
         std::filesystem::create_directories(rec_dir, ec);
         auto file = rec_dir / (a.tape_name + (a.marked ? "_MARK" : "") + ".rec");
@@ -1406,6 +1411,8 @@ namespace rondelirium
             float d[3] = {float(dir.x), float(dir.y), float(dir.z)};
             // The push by the health left: a light shove for an unhurt one, a hard one for one nearly gone (or dying).
             float left = a.alive ? a.left : 0.0f;
+            // (global in the engine: set for each agent's own calls, the dying's lower)
+            nm::api.set_shot_body_stiffness(a.alive ? 0.0f : cfg.dying_stiffness);
             nm::api.set_shot_force_scale(weapon_push(a.hit.weapon) / ENGINE_SHOT_FORCE * cfg.push_scale
                                          * (cfg.healthy_push + (cfg.weak_push - cfg.healthy_push) * (1.0f - left)));
             nm::api.agent_shot(a.agent, a.world, nullptr, hit, at, d, health, shooter);
@@ -1447,6 +1454,7 @@ namespace rondelirium
         }
         else
         {
+            nm::api.set_shot_body_stiffness(a.alive ? 0.0f : cfg.dying_stiffness);
             nm::api.agent_shot_update(a.agent, a.world, health, shooter);
         }
 

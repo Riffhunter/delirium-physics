@@ -30,6 +30,7 @@ namespace nm
         int32_t (*world_set_boxes)(void*, const float*, int32_t);
         int32_t (*world_add_mesh)(void*, const float*, int32_t, const uint32_t*, int32_t, const uint8_t*);
         int32_t (*set_shot_force_scale)(float);
+        int32_t (*set_shot_body_stiffness)(float);
         void* (*agent_create)(const void*, const float*, float, float);
         void (*agent_destroy)(void*);
         int32_t (*agent_set_part_states)(void*, const float*, int32_t);
@@ -78,6 +79,7 @@ namespace nm
             get(world_set_boxes, "nm_world_set_boxes");
             get(world_add_mesh, "nm_world_add_mesh");
             get(set_shot_force_scale, "nm_set_shot_force_scale");
+            get(set_shot_body_stiffness, "nm_set_shot_body_stiffness");
             get(agent_create, "nm_agent_create");
             get(agent_destroy, "nm_agent_destroy");
             get(agent_set_part_states, "nm_agent_set_part_states");
@@ -122,6 +124,18 @@ namespace nm
         inline Api raw{};
         inline std::map<const void*, std::string*> on;  // the agents and worlds being recorded, and their tapes
         inline float force = 1.0f;                     // the shot force scale (global in the DLL): set before each shot
+        inline float stiff = 0.0f;                     // the shots' body stiffness (global too; 0 the usual)
+        inline std::map<const std::string*, float> stiff_written;  // the last one each tape has
+
+        // The body stiffness on the tape when it changed for that agent (it's set before each of its shot calls).
+        inline void put_stiff(std::string& s)
+        {
+            if (auto it = stiff_written.find(&s); it == stiff_written.end() ? stiff != 0.0f : it->second != stiff)
+            {
+                std::format_to(std::back_inserter(s), "stiff {}\n", stiff);
+                stiff_written[&s] = stiff;
+            }
+        }
 
         inline std::string* of(const void* h)
         {
@@ -155,6 +169,11 @@ namespace nm
             }
             return raw.world_add_mesh(w, v, nv, t, nt, m);
         }
+        inline int32_t set_shot_body_stiffness(float k)
+        {
+            stiff = k;
+            return raw.set_shot_body_stiffness(k);
+        }
         inline int32_t set_shot_force_scale(float f)
         {
             force = f;
@@ -180,6 +199,7 @@ namespace nm
         {
             if (auto s = of(a))
             {
+                put_stiff(*s);
                 std::format_to(std::back_inserter(*s), "shot {} {} {}", force, weapon ? weapon : "-", part);
                 put(*s, at, 3);
                 put(*s, dir, 3);
@@ -193,6 +213,7 @@ namespace nm
         {
             if (auto s = of(a))
             {
+                put_stiff(*s);
                 std::format_to(std::back_inserter(*s), "upd {} {}", health, shooter ? 1 : 0);
                 if (shooter) put(*s, shooter, 3);
                 *s += '\n';
@@ -233,6 +254,7 @@ namespace nm
             api.world_set_boxes = world_set_boxes;
             api.world_add_mesh = world_add_mesh;
             api.set_shot_force_scale = set_shot_force_scale;
+            api.set_shot_body_stiffness = set_shot_body_stiffness;
             api.agent_set_part_states = agent_set_part_states;
             api.agent_step = agent_step;
             api.agent_apply_push = agent_apply_push;

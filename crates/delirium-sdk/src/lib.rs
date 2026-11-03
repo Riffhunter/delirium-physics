@@ -484,6 +484,24 @@ pub unsafe extern "C" fn nm_debug_trace(out: *mut f32, n: i32) -> i32 {
     0
 }
 
+/// Diagnosis (RoNDelirium): up to n joints' effectors, 7 floats each (desired 3, zero 3, strength); returns how many.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nm_debug_effectors(a: *const NmAgent, out: *mut f32, n: i32) -> i32 {
+    let Some(a) = (unsafe { a.as_ref() }) else { return fail(NM_E_ARG, "null agent") };
+    if out.is_null() || n <= 0 { return fail(NM_E_ARG, "nm_debug_effectors: no buffer") }
+    let e = a.agent.debug_effectors();
+    let k = e.len().min(n as usize);
+    for (j, v) in e.iter().take(k).enumerate() { for i in 0..7 { unsafe { *out.add(7 * j + i) = v[i] } } }
+    k as i32
+}
+
+/// Diagnosis (RoNDelirium): which optional behaviours run (bits: catchFall, flinch, writhe, windmill, pedal, rollUp,
+/// brace, shot, held, effector overrides).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nm_debug_active(a: *const NmAgent) -> u32 {
+    unsafe { a.as_ref() }.map_or(0, |a| a.agent.debug_active())
+}
+
 /// The agent's random numbers from this seed (a recording sets it, and its replay sets it again).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nm_agent_set_seed(a: *mut NmAgent, seed: u32) -> i32 {
@@ -1162,6 +1180,16 @@ pub unsafe extern "C" fn nm_agent_shot_update(a: *mut NmAgent, w: *const NmWorld
 }
 
 /// nm_agent_shot's bullet push: each weapon's force times `scale` (1 = GTA IV's own).
+/// RoNDelirium: the body stiffness of the shots that follow (nm_agent_shot), instead of the usual (0 = the usual).
+#[unsafe(no_mangle)]
+pub extern "C" fn nm_set_shot_body_stiffness(k: f32) -> i32 {
+    if !(k >= 0.0) {
+        return fail(NM_E_ARG, "nm_set_shot_body_stiffness: k >= 0");
+    }
+    delirium::shottask::set_body_stiffness_override(k);
+    0
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn nm_set_shot_force_scale(scale: f32) -> i32 {
     if !(scale >= 0.0) {
