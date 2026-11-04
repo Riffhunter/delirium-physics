@@ -23,6 +23,10 @@ character, and none of either is taken from any game.
 - **The mod** (`rondelirium/`): the UE4SS C++ mod (`rondelirium/mod/src`), its settings (`rondelirium/mod/delirium.ini`)
   and build files.
 
+- **The calibration method** ([`rondelirium/CALIBRATION.md`](rondelirium/CALIBRATION.md)): how those values and that
+  character were found by behaviour, and how to do the same in another game; the tools are in
+  `rondelirium/tools/calibration`.
+
 Each changed source file marks its changes with "RoNDelirium".
 
 ## Building

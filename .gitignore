@@ -4,3 +4,9 @@ room-build.log
 target_dev/
 rondelirium/build/
 rondelirium/RE-UE4SS/
+
+# A calibration's reference and recordings stay on your machine (CALIBRATION.md)
+reference/
+*.rec
+fit_ref*.json
+__pycache__/
