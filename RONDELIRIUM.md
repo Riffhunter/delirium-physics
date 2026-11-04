@@ -40,9 +40,12 @@ Visual Studio) → `rondelirium/build/mod/RoNDelirium.dll`, installed as
 `ReadyOrNot/Binaries/Win64/ue4ss/Mods/RoNDelirium/dlls/main.dll` next to `delirium_physics.dll`.
 `cmake -DRONDELIRIUM_DEV=ON` adds the developer's tools; releases leave them out.
 
-**The character** is regenerated with:
+**The character** is made with:
 
     cargo run --release --example make_ron_character -- rondelirium/tools/ron_joints.json crates/delirium-sdk/src/character_ron.json
+
+The `character_ron.json` in this repository has since been calibrated on behaviour (joint axes and ranges of the neck,
+spine, arms and legs, part frames and centres, masses), so regenerating it gives the uncalibrated character.
 
 ## Credits
 

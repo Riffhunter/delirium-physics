@@ -52,7 +52,7 @@ namespace rondelirium
         float fade = 1.5f;        // the last seconds of a dead body's drive: Delirium's hold eases off, the ragdoll goes limp gently
         float track_pos = 8.0f;     // 1/s: how fast a body is pulled onto its Delirium part's place
         float track_rot = 12.0f;    // 1/s: likewise its turn
-        float push_scale = 1.0f;    // the bullet's push: the mod's own for the kind of gun (weapon_push) times this
+        float push_scale = 1.45f;   // the bullet's push: the mod's own for the kind of gun (weapon_push) times this (1.45: calibration v4 against GTA IV's reactions)
         float resync = 0.4f;        // m: Delirium's pelvis this far from the ragdoll's, and Delirium is set from the ragdoll again
         float max_kick = 2.0f;      // m/s a body's velocity may change in one frame: a guard against jolts
         float max_spin_kick = 10.0f;  // rad/s likewise for its spin
@@ -88,6 +88,7 @@ namespace rondelirium
         // The shot reaction's body stiffness for a dying body (0: the same as alive). The usual one, calibrated on the
         // living, curled the dying into a ball with the arms pulled in at full strength: the hands ended at the neck.
         float dying_stiffness = 6.0f;
+        float lift_cap = 1.0f;       // a dying body's centre of mass rises no faster than this (m/s; 0 = off): Delirium (GTA IV too) could make one push off the floor and fly
         bool trunk_at_zero = false;  // after the fit, the trunk's joints at their zero (for Skyrim Delirium's character, NM_SKYRIMCHAR)
     };
     inline Settings cfg;
@@ -139,6 +140,7 @@ namespace rondelirium
             else if (key == "record") cfg.record = v != 0;
             else if (key == "record_keep") cfg.record_keep = std::max(int(v), 10);
             else if (key == "dying_stiffness") cfg.dying_stiffness = std::max(v, 0.0f);
+            else if (key == "lift_cap") cfg.lift_cap = std::max(v, 0.0f);
             else if (key == "trunk_at_zero") cfg.trunk_at_zero = v != 0;
         }
     }
@@ -609,7 +611,9 @@ namespace rondelirium
         auto& s = *a.tape;
         std::format_to(std::back_inserter(s), "rec 1 {} {} {}\n", narrow(character->GetName()), a.cal->asset.empty() ? "?" : a.cal->asset,
                        a.alive ? "alive" : "dead");
-        std::format_to(std::back_inserter(s), "engine {}\nfit", engine);
+        // push: the push_scale the shot values below include (replay.py tries others in its place)
+        // lift: the lift_cap replay.py applies the same way (it isn't in the calls)
+        std::format_to(std::back_inserter(s), "engine {}\npush {}\nlift {}\nfit", engine, cfg.push_scale, cfg.lift_cap);
         nm::tape::put(s, a.cal->joints.data(), nm::PARTS * 3);
         if (a.cal->posed) std::format_to(std::back_inserter(s), "\nposed {}", a.cal->posed);
         s += "\nref";
@@ -1463,6 +1467,42 @@ namespace rondelirium
         {
             Output::send<LogLevel::Error>(STR("[RoNDelirium] step: {}\n"), to_wstring(nm::api.error()));
             return end(a, STR("error")), false;
+        }
+        // A dying body pushing off the floor: in a few cases Delirium (as GTA IV) drove the legs of one on its way down until
+        // it flew up half a metre and more. Its centre of mass no faster up than lift_cap, the limbs' own motion untouched.
+        // (Not recorded: replay.py does the same from the recording's 'lift' line.)
+        if (!a.alive && cfg.lift_cap > 0.0f)
+        {
+            float c[3], v[3];
+            nm::api.agent_get_com(a.agent, c, v);
+            if (v[2] > cfg.lift_cap)
+            {
+                float dv[3] = {0.0f, 0.0f, cfg.lift_cap - v[2]};
+                nm::api.agent_add_velocity(a.agent, dv);
+            }
+        }
+        // A body Delirium lost (not a number anywhere, or flung far): the game's ragdoll takes it as it is, never
+        // given that pose or speed. Seen offline only, on untried values.
+        for (int k = 0; k < 21; ++k)
+        {
+            float p[3], q[4], v[3], w[3];
+            nm::api.agent_get_part_transform(a.agent, k, p, q);
+            nm::api.agent_get_part_velocity(a.agent, k, v, w);
+            bool sane = true;
+            for (float x : {p[0], p[1], p[2], q[0], q[1], q[2], q[3], v[0], v[1], v[2], w[0], w[1], w[2]}) sane = sane && std::isfinite(x);
+            if (!sane || std::hypot(v[0], v[1], v[2]) > 60.0f)
+            {
+                Output::send<LogLevel::Warning>(STR("[RoNDelirium] Delirium lost the body (part {}): the game's ragdoll takes it\n"), k);
+                note(a, "lost");
+                if (a.own)  // a stagger: as one that went down (the game's ragdoll and its get-up)
+                {
+                    release_held(a);
+                    capsule_later(a, character);
+                    ufn::Call(ufn::find(character, STR("EnableRagdoll"))).set(STR("Duration"), 1.0f).set<bool>(STR("bClearBodyVelocities"), true).invoke(character);
+                    a.own = false;
+                }
+                return end(a, STR("lost")), false;
+            }
         }
         a.time += step;
         a.total += step;

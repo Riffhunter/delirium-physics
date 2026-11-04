@@ -36,6 +36,8 @@ namespace nm
         int32_t (*agent_set_part_states)(void*, const float*, int32_t);
         int32_t (*agent_step)(void*, const void*, float);
         int32_t (*agent_get_part_velocity)(const void*, int32_t, float*, float*);
+        int32_t (*agent_get_com)(const void*, float*, float*);
+        int32_t (*agent_add_velocity)(void*, const float*);
         int32_t (*agent_get_part_transform)(const void*, int32_t, float*, float*);
         int32_t (*agent_get_joint)(const void*, int32_t, int32_t*, float*, float*, float*, float*);
         int32_t (*agent_apply_push)(void*, const float*, const float*);
@@ -85,6 +87,8 @@ namespace nm
             get(agent_set_part_states, "nm_agent_set_part_states");
             get(agent_step, "nm_agent_step");
             get(agent_get_part_velocity, "nm_agent_get_part_velocity");
+            get(agent_get_com, "nm_agent_get_com");
+            get(agent_add_velocity, "nm_agent_add_velocity");
             get(agent_get_part_transform, "nm_agent_get_part_transform");
             get(agent_get_joint, "nm_agent_get_joint");
             get(agent_apply_push, "nm_agent_apply_push");
