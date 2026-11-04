@@ -86,28 +86,28 @@
 38 40                      # GJK iterations at most; balance countdown in frames
 # --- the ragdoll's world ---
 128 0.016                  # collision margin (m) [calibrated on behaviour (Skyrim Delirium's character), was 0.025]
-567 0.03                   # world contact margin (m); squared spin to sleep [calibrated on our character in the game's own cases against GTA IV, 19 recordings; validated on 27 others, was 0.04]
+567 0.0468501              # world contact margin (m); squared spin to sleep [calibrated v3 (CMA, fit_ref3), was 0.03]
 573 0.01                   # penetration let pass (m)
 574 0.09                   # a contact held this far off is dropped (m) [calibrated on the game's own cases against GTA IV, 4 recordings, was 0.12]
 578 0.01                   # contact distance taken as touching (m)
 556 0.65                   # most a body moves in a substep (m)
 579 0.785398               # most a body turns in a substep (rad)
 59 50                     # fastest a body may go (m/s); shock spin's top [calibrated on behaviour (Skyrim Delirium's character), was 32]
-126 0.0384                 # joint limit margin (rad); small offsets (m) [calibrated on behaviour, was 0.06]
+126 0.0204881              # joint limit margin (rad); small offsets (m) [calibrated v3 (CMA, fit_ref3), was 0.0384]
 62 1.6                     # eye height (m)
 63 0.16                    # the walker's foot radius (m); small angles (rad) [calibrated on our character in the game's own cases against GTA IV, 19 recordings; validated on 27 others, was 0.32]
 64 0.0559                 # small heights / thresholds (m) [calibrated on behaviour (Skyrim Delirium's character), was 0.0447]
 61 1.792                  # most substeps a frame; ground cell (m); a few rad/s [calibrated on behaviour (Skyrim Delirium's character), was 3.5]
-54 0.4                     # moving speed (m/s)
-74 1.2                     # second probe height (m); spin threshold (rad/s)
+54 0.483421                # moving speed (m/s) [calibrated v3 (CMA, fit_ref3), was 0.4]
+74 0.656624                # second probe height (m); spin threshold (rad/s) [calibrated v3 (CMA, fit_ref3), was 1.2]
 70 0.7                     # a wall: |n.z| under this; dot thresholds; damping
 # --- the pool of tuning values the behaviours share (stiffness on a 0-16 scale, damping 0-1, s, m, rad) ---
 32 6.0                     # quintic smootherstep 6t^5-15t^4+10t^3; a light stiffness
 26 15.0                    # ... 15; the stiffest clamp
 27 8                      # ... 10; the usual body stiffness [calibrated on behaviour (Skyrim Delirium's character), was 10]
 5 3.0                      # stay-upright stiffness (the feet stabiliser squares it: 8 kicked the feet out); far target (m)
-21 9.6                    # firm limb stiffness; a top recoverable speed (m/s) [calibrated on behaviour (Skyrim Delirium's character), was 12]
-11 14.0                    # ankle / grab stiffness; hip twist loosening (deg)
+21 24.6638                 # firm limb stiffness; a top recoverable speed (m/s) [calibrated v3 (CMA, fit_ref3), was 9.6]
+11 11.2641                 # ankle / grab stiffness; hip twist loosening (deg) [calibrated v3 (CMA, fit_ref3), was 14.0]
 121 14.5                   # aiming / controller stiffness
 131 10.5                   # balance / foetal / torso stiffness
 199 16.5                   # stiffness while shot on their feet [calibrated on our character in the game's own cases against GTA IV, 19 recordings; validated on 27 others, was 8.25]
@@ -119,7 +119,7 @@
 29 7.0                     # neck / elbow / pedalling stiffness; noise rate
 60 6.25                   # trunk stiffness; a few rad/s; clamp top [calibrated on behaviour, was 5]
 108 2                      # speeds (m/s), rates, clavicle stiffness, decay [calibrated on our character in the game's own cases against GTA IV, 19 recordings; validated on 27 others, was 4.0]
-30 3.0                     # rates (rad/s), timers (s)
+30 2.75841                 # rates (rad/s), timers (s) [calibrated v3 (CMA, fit_ref3), was 3.0]
 12 1.995                   # timers (s), reach angle (rad) [calibrated on our character in the game's own cases against GTA IV, 19 recordings; validated on 27 others, was 1.5]
 193 1.3                    # arm-slowing amount, scale
 198 1.25                   # bend (rad), leg spin (rad/s), fling time (s)
@@ -150,22 +150,22 @@
 35 0.35                    # distances (m), twist (rad), grip
 227 0.33                   # reach absorb time (s), lean clamp
 545 0.35                   # since-hit wait (s)
-57 0.3                     # probe radius (m), leans, offsets
+57 0.225634                # probe radius (m), leans, offsets [calibrated v3 (CMA, fit_ref3), was 0.3]
 544 0.3                    # shot timing (s)
 183 0.28                   # arms-out lean
 537 0.25                   # roll-up lift
 110 0.25                   # times (s), drops (m), damping gains
-24 0.2                     # small offsets (m), times (s), scales
+24 0.217286                # small offsets (m), times (s), scales [calibrated v3 (CMA, fit_ref3), was 0.2]
 538 0.2                    # roll-up offset (m)
 140 0.18                   # step slack (m), hand distance
 182 0.15                   # turn probabilities, spin scale
-125 0.045                  # foot-lift threshold (m), torque share [calibrated v2 on our character against GTA IV's behaviour in 118 recordings (59 fitted, 59 checked), was 0.06]
+125 0.0287817              # foot-lift threshold (m), torque share [calibrated v3 (CMA, fit_ref3), was 0.045]
 547 0.12                   # phase step
-105 0.0894                 # small offsets (m), spine bends (rad) [calibrated on behaviour (Skyrim Delirium's character), was 0.08]
+105 0.188703               # small offsets (m), spine bends (rad) [calibrated v3 (CMA, fit_ref3), was 0.0894]
 113 0.0626                 # small offsets (m), damping [calibrated on behaviour, was 0.07]
-73 0.032                   # small times (s), offsets (m), damping [calibrated on our character in the game's own cases against GTA IV, 19 recordings; validated on 27 others, was 0.064]
+73 0.0623604               # small times (s), offsets (m), damping [calibrated v3 (CMA, fit_ref3), was 0.032]
 197 0.05                   # balance lean bias (rad)
-278 0.4688                 # stabiliser velocity share [calibrated on behaviour, was 0.3]
+278 0.686493               # stabiliser velocity share [calibrated v3 (CMA, fit_ref3), was 0.4688]
 532 0.2048                 # roll-up scale [calibrated on behaviour (Skyrim Delirium's character), was 0.4]
 534 2.5                    # roll-up spin threshold (rad/s)
 535 3.141592653589793      # roll-up legs out of phase
@@ -182,7 +182,7 @@
 541 50.0                   # shock spin top
 # --- the balancer's foot placement (nmdbm): a PD on the centre of mass, scaled by Delirium's own 1/288 ---
 257 300.0                  # lean gain (and lead)
-258 399                    # sideways gain [calibrated v2 on our character against GTA IV's behaviour in 118 recordings (59 fitted, 59 checked), was 300.0]
+258 247.848                # sideways gain [calibrated v3 (CMA, fit_ref3), was 399]
 259 60.0                   # sideways integral gain
 261 60.0                   # lean integral gain
 262 0.0039                 # lean output scale (as slot 260) [calibrated on behaviour (Skyrim Delirium's character), was 0.00347222]
