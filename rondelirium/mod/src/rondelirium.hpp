@@ -17,6 +17,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <string>
 #include <vector>
@@ -50,9 +51,11 @@ namespace rondelirium
         float health = 60.0f;     // the dying reaction's health: 50-70 staggers a moment and goes down; 100 and up never falls
         float dead_max = 8.0f;    // seconds at most a dead body stays Delirium's while bullets keep coming
         float fade = 1.5f;        // the last seconds of a dead body's drive: Delirium's hold eases off, the ragdoll goes limp gently
+        bool headshot_limp = true;     // killed by a bullet in the head or neck: no dying reaction, the body drops lifeless
+        float headshot_duration = 0.0f;  // seconds Delirium still holds such a body, easing off over all of them (0 = let go at once)
         float track_pos = 8.0f;     // 1/s: how fast a body is pulled onto its Delirium part's place
         float track_rot = 12.0f;    // 1/s: likewise its turn
-        float push_scale = 1.45f;   // the bullet's push: the mod's own for the kind of gun (weapon_push) times this (1.45: calibration v4 against GTA IV's reactions)
+        float push_scale = 1.556f;  // the bullet's push: the mod's own for the kind of gun (weapon_push) times this (1.556: the value the character was fitted with)
         float resync = 0.4f;        // m: Delirium's pelvis this far from the ragdoll's, and Delirium is set from the ragdoll again
         float max_kick = 2.0f;      // m/s a body's velocity may change in one frame: a guard against jolts
         float max_spin_kick = 10.0f;  // rad/s likewise for its spin
@@ -90,6 +93,16 @@ namespace rondelirium
         float dying_stiffness = 6.0f;
         float lift_cap = 1.0f;       // a dying body's centre of mass rises no faster than this (m/s; 0 = off): Delirium (GTA IV too) could make one push off the floor and fly
         bool trunk_at_zero = false;  // after the fit, the trunk's joints at their zero (for Skyrim Delirium's character, NM_SKYRIMCHAR)
+        // The taser: Delirium's electrocute on the body while the game has them tased. Tuned by eye: GTA IV gave nothing to measure against.
+        bool taser = true;
+        bool taser_stiff = false;     // rigid as they shake (slower down, and the hands come to the face), or loose
+        float taser_strength = 2.0f;  // each jolt's size
+        float taser_interval = 0.07f; // seconds between jolts
+        float taser_large = 2.0f;     // the bigger jolt every second or two, times this
+        float taser_min = 1.0f;       // seconds at least, however short the game's stun
+        float taser_max = 8.0f;       // and at most, or when the game's state can't be read
+        float taser_health = 40.0f;   // the shot task's health while shocked: as stagger_health, lower gives way sooner (an unhurt one's 200 kept them walking)
+        float taser_stiffness = 2.0f; // the shot task's body stiffness while shocked, as dying_stiffness: the living's pulled their hands to the face on the floor
     };
     inline Settings cfg;
 
@@ -109,6 +122,8 @@ namespace rondelirium
             else if (key == "duration") cfg.duration = v;
             else if (key == "health") cfg.health = v;
             else if (key == "fade") cfg.fade = v;
+            else if (key == "headshot_limp") cfg.headshot_limp = v != 0;
+            else if (key == "headshot_duration") cfg.headshot_duration = std::max(v, 0.0f);
             else if (key == "dead_max") cfg.dead_max = v;
             else if (key == "max_kick") cfg.max_kick = v;
             else if (key == "track_pos") cfg.track_pos = v;
@@ -142,6 +157,15 @@ namespace rondelirium
             else if (key == "dying_stiffness") cfg.dying_stiffness = std::max(v, 0.0f);
             else if (key == "lift_cap") cfg.lift_cap = std::max(v, 0.0f);
             else if (key == "trunk_at_zero") cfg.trunk_at_zero = v != 0;
+            else if (key == "taser_reaction") cfg.taser = v != 0;
+            else if (key == "taser_stiff") cfg.taser_stiff = v != 0;
+            else if (key == "taser_health") cfg.taser_health = std::max(v, 0.0f);
+            else if (key == "taser_stiffness") cfg.taser_stiffness = std::max(v, 0.0f);
+            else if (key == "taser_strength") cfg.taser_strength = std::max(v, 0.0f);
+            else if (key == "taser_interval") cfg.taser_interval = std::max(v, 0.02f);
+            else if (key == "taser_large") cfg.taser_large = std::max(v, 1.0f);
+            else if (key == "taser_min") cfg.taser_min = std::max(v, 0.0f);
+            else if (key == "taser_max") cfg.taser_max = std::max(v, 0.5f);
         }
     }
 
@@ -453,6 +477,7 @@ namespace rondelirium
         double time = 0;
         bool started = false;
         bool alive = false;  // a stagger on a live character
+        bool limp = false;   // killed by a bullet in the head: drops lifeless (headshot_duration, not the dying reaction's)
         bool new_hit = true; // a bullet to hand to the shot task this frame
         bool own = false;    // the stagger runs on the mesh's own physics (not the game's ragdoll)
         double blend_left = -1;  // blending back into the animation: seconds left
@@ -469,8 +494,12 @@ namespace rondelirium
             FWeakObjectPtr parent;
             FName socket;
             DVec rel_loc, rel_rot, rel_scale;  // its relative location, rotation (pitch, yaw, roll) and scale on the socket
+            // Its parts (the gun's mesh, its lights) and where they sat on it: they carry the gun's place on the hand (see grab_held).
+            struct Part { FWeakObjectPtr comp; FName socket; DVec loc, rot, scale; T on_hand; };
+            std::vector<Part> parts;
         };
         std::vector<Held> held;
+        double next_gun_diag = 0;
         uint8 capsule_response = 255;  // the capsule's response to physics bodies before the stagger (255: untouched)
         Hit hit;
         double next_diag = 0;
@@ -482,6 +511,9 @@ namespace rondelirium
         double fire_from = -1, fire_until = -1, next_fire = 0;  // firing back: the burst's window (stagger time) and next shot
         float left = 1;    // the game's health left (0-1) at the last hit
         double total = 0;  // seconds of this stagger, all its hits together (time restarts with each)
+        bool tase_first = false;  // the stagger was begun by a taser, no bullet: no push, no hand to a wound, no firing back
+        bool shock_pending = false, shock = false;  // the electrocute message to send, and running
+        double shock_since = 0, shock_for = 0;  // when it began (now_s), and the stun's length if the game told us (0: not told)
         double still = 0;  // seconds Delirium's pelvis has been settled, on their feet, since the last hit
         std::array<double, nm::PARTS> stuck{};  // seconds each body has stayed far from its Delirium part
         bool limb_resync = false;  // a limb that can't follow: Delirium set from the ragdoll again next frame
@@ -508,9 +540,13 @@ namespace rondelirium
     inline double now_s = 0;  // seconds since the mod started
     inline std::map<UObject*, double> recovered_at;  // a character back from a stagger shrugs off bullets until then
     inline std::map<UObject*, Hit> last_hits;  // each character's last bullet hit
+    inline std::map<UObject*, double> last_head;  // when each character last took a bullet in the head or neck
     inline std::vector<FWeakObjectPtr> pending;  // ragdolls that started since the last tick
     inline std::vector<FWeakObjectPtr> shot;     // characters hit since the last tick
     inline std::vector<FWeakObjectPtr> tracked;  // every character hit this mission: watched for their ragdoll
+    inline std::vector<FWeakObjectPtr> people;   // every suspect and civilian that exists: watched for the taser only
+    inline std::vector<FWeakObjectPtr> born;     // suspects and civilians just made, for people (they may be made off the game thread)
+    inline std::mutex born_lock;
     inline std::vector<FWeakObjectPtr> released; // let go of: not taken again until they're shot again
 
     inline std::vector<FWeakObjectPtr> laid_to_rest; // dead bodies Delirium let go of: their ragdoll is the game's from then on
@@ -557,6 +593,28 @@ namespace rondelirium
         auto now = (*comp)->GetValuePtrByPropertyNameInChain<float>(STR("Resource"));
         auto most = (*comp)->GetValuePtrByPropertyNameInChain<float>(STR("MaxResource"));
         return now && most && *most > 0 ? std::clamp(*now / *most, 0.0f, 1.0f) : 1.0f;
+    }
+
+    // A function of the character answering yes or no: 1, 0, or -1 when this class has no such function.
+    inline int asked(UObject* character, const TCHAR* fn)
+    {
+        UFunction* f = ufn::find(character, fn);
+        if (!f) return -1;
+        ufn::Call c(f);
+        c.invoke(character);
+        return c.get<bool>(STR("ReturnValue")) ? 1 : 0;
+    }
+
+    // Is the game holding them tased? 1, 0, or -1 when it can't be told.
+    inline int game_tased(UObject* character)
+    {
+        return asked(character, STR("IsCurrentlyTased"));
+    }
+
+    // In the game's hands now, not ours: the arrest's animation must get the body.
+    inline bool being_arrested(UObject* character)
+    {
+        return asked(character, STR("IsBeingArrested")) == 1 || asked(character, STR("IsArrested")) == 1;
     }
 
     inline bool driving(UObject* character)
@@ -699,6 +757,20 @@ namespace rondelirium
         }
     }
 
+    // Did a bullet in the head or neck just kill them? (Neck too: RoNGore's decapitations count it as the head. Within half
+    // a second, not the last hit only: a shotgun's other pellets land in the same moment, and the game's death ragdoll
+    // comes a little after the bullet.)
+    inline void note_head_hit(UObject* c, const StringType& bone)
+    {
+        if (int part = part_of(bone); part == 11 || part == 12) last_head[c] = now_s;
+    }
+
+    inline bool head_kill(UObject* c)
+    {
+        auto it = last_head.find(c);
+        return cfg.headshot_limp && it != last_head.end() && now_s - it->second < 0.5;
+    }
+
     // ---- a stagger on the mesh's own physics ----
     // The game's ragdoll (EnableRagdoll) drops the weapon and ends in its get-up-off-the-floor animation, standing or
     // not. A stagger instead turns on the mesh's bodies below the pelvis itself, with the ragdoll's collision and
@@ -837,13 +909,29 @@ namespace rondelirium
             // Only things on a socket (a civilian's AI controller rides along on the character, on none).
             if (!actor || (controller && actor->IsA(controller))) continue;
             auto root = actor->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
-            if (!root || !*root || fname_call(*root, STR("GetAttachSocketName")) == name(L"None")) continue;
+            if (!root || !*root) continue;
             DTransform w = world_of(*root);
-            // The hand its socket names (a two-handed gun sits nearer the left), else the nearer one.
             auto socket = fname_call(*root, STR("GetAttachSocketName")).ToString();
+            const double from_hand = std::min(len(w.pos - hand_t[0].pos), len(w.pos - hand_t[1].pos));
+            // Only what's on this character's own body: the player's taser shows up here once its probes are in them, on
+            // the socket of the player's hand, and must stay there.
+            ufn::Call on(ufn::find(*root, STR("GetAttachParent")));
+            on.invoke(*root);
+            UObject* on_comp = on.get<UObject*>(STR("ReturnValue"));
+            UObject* on_owner = nullptr;
+            if (on_comp)
+            {
+                ufn::Call owner(ufn::find(on_comp, STR("GetOwner")));
+                owner.invoke(on_comp);
+                on_owner = owner.get<UObject*>(STR("ReturnValue"));
+            }
+            const bool mine = on_owner == character;
+            // All they carry, in the log, for bug reports.
+            log(STR("[RoNDelirium]   attached {}: socket {}, {:.0f} cm from a hand{}\n"), actor->GetName(), socket, from_hand, mine ? STR("") : STR(", on someone else"));
+            if (!mine || socket == STR("None") || from_hand > 40.0) continue;
+            // The hand its socket names (a two-handed gun sits nearer the left), else the nearer one.
             int best = socket.starts_with(STR("Right")) ? 1 : socket.starts_with(STR("Left")) ? 0
                      : len(w.pos - hand_t[0].pos) < len(w.pos - hand_t[1].pos) ? 0 : 1;
-            if (std::min(len(w.pos - hand_t[0].pos), len(w.pos - hand_t[1].pos)) > 40.0) continue;
             T hand{hand_t[best].pos, hand_t[best].rot};
             Agent::Held h{FWeakObjectPtr(*root), hands[best], compose(inverse(hand), T{w.pos, w.rot}), w.scale};
             ufn::Call parent(ufn::find(*root, STR("GetAttachParent")));
@@ -854,14 +942,52 @@ namespace rondelirium
             h.rel_loc = prop(STR("RelativeLocation"));
             h.rel_rot = prop(STR("RelativeRotation"));
             h.rel_scale = prop(STR("RelativeScale3D"));
-            // On the physical hand's bone where it is now: the engine carries it with the simulated hand, in step (set by
-            // hand after the frame, it lagged a frame and shook).
+            // On the physical hand's bone: the engine carries it with the simulated hand, in step (set by hand after the frame,
+            // it lagged a frame and shook). But the game zeroes a held item's root on what it's attached to, every frame: a
+            // root kept where it was on the bone ended at the bone's origin, turned 69 degrees, the gun across the hand. So the
+            // root goes where the game wants it, at zero on the bone, and its parts stay where they are, on it, off that zero.
+            ufn::Call count(ufn::find(*root, STR("GetNumChildrenComponents")));
+            count.invoke(*root);
+            for (int32 k = 0, n = count.get<int32>(STR("ReturnValue")); k < n; ++k)
+            {
+                ufn::Call child(ufn::find(*root, STR("GetChildComponent")));
+                child.set<int32>(STR("ChildIndex"), k).invoke(*root);
+                UObject* c = child.get<UObject*>(STR("ReturnValue"));
+                if (!c) continue;
+                auto of = [&](const TCHAR* n2) { auto v = c->GetValuePtrByPropertyNameInChain<DVec>(n2); return v ? *v : DVec{}; };
+                h.parts.push_back({FWeakObjectPtr(c), fname_call(c, STR("GetAttachSocketName")), of(STR("RelativeLocation")), of(STR("RelativeRotation")), of(STR("RelativeScale3D")), T{}});
+            }
+            auto parts_off = [](Agent::Held& held) {
+                for (auto& p : held.parts)
+                {
+                    if (UObject* c = p.comp.Get())
+                    {
+                        ufn::Call(ufn::find(c, STR("K2_DetachFromComponent"))).set<uint8>(STR("LocationRule"), 1).set<uint8>(STR("RotationRule"), 1)
+                            .set<uint8>(STR("ScaleRule"), 1).set<bool>(STR("bCallModify"), false).invoke(c);
+                    }
+                }
+            };
+            parts_off(h);
             ufn::Call(ufn::find(*root, STR("K2_AttachToComponent"))).set(STR("Parent"), mesh).set(STR("SocketName"), name(hands[best]))
-                .set<uint8>(STR("LocationRule"), 1).set<uint8>(STR("RotationRule"), 1).set<uint8>(STR("ScaleRule"), 1)
+                .set<uint8>(STR("LocationRule"), 2).set<uint8>(STR("RotationRule"), 2).set<uint8>(STR("ScaleRule"), 1)
                 .set<bool>(STR("bWeldSimulatedBodies"), false).invoke(*root);
+            for (auto& p : h.parts)
+            {
+                UObject* c = p.comp.Get();
+                if (!c) continue;
+                ufn::Call(ufn::find(c, STR("K2_AttachToComponent"))).set(STR("Parent"), *root).set(STR("SocketName"), p.socket)
+                    .set<uint8>(STR("LocationRule"), 1).set<uint8>(STR("RotationRule"), 1).set<uint8>(STR("ScaleRule"), 1)
+                    .set<bool>(STR("bWeldSimulatedBodies"), false).invoke(c);
+                DTransform t = world_of(c);
+                p.on_hand = compose(inverse(hand), T{t.pos, t.rot});
+            }
             a.held.push_back(h);
             log(STR("[RoNDelirium]   carries {} in {} (from socket {})\n"), actor->GetName(), hands[best], h.socket.ToString());
         }
+        // The gun the game says they have, to compare with the above in a bug report.
+        auto inv = character->GetValuePtrByPropertyNameInChain<UObject*>(STR("InventoryComp"));
+        auto gun = inv && *inv ? (*inv)->GetValuePtrByPropertyNameInChain<UObject*>(STR("LastEquippedWeapon")) : nullptr;
+        log(STR("[RoNDelirium]   last equipped: {}\n"), gun && *gun ? (*gun)->GetName() : StringType(STR("none")));
     }
 
     // Each held item back on its socket, where it sat before the stagger.
@@ -878,6 +1004,14 @@ namespace rondelirium
             ufn::Call(ufn::find(root, STR("K2_SetRelativeLocationAndRotation"))).set(STR("NewLocation"), h.rel_loc).set(STR("NewRotation"), h.rel_rot)
                 .set<bool>(STR("bSweep"), false).set<bool>(STR("bTeleport"), true).invoke(root);
             ufn::Call(ufn::find(root, STR("SetRelativeScale3D"))).set(STR("NewScale3D"), h.rel_scale).invoke(root);
+            for (auto& p : h.parts)  // the parts back as they were on it
+            {
+                UObject* c = p.comp.Get();
+                if (!c) continue;
+                ufn::Call(ufn::find(c, STR("K2_SetRelativeLocationAndRotation"))).set(STR("NewLocation"), p.loc).set(STR("NewRotation"), p.rot)
+                    .set<bool>(STR("bSweep"), false).set<bool>(STR("bTeleport"), true).invoke(c);
+                ufn::Call(ufn::find(c, STR("SetRelativeScale3D"))).set(STR("NewScale3D"), p.scale).invoke(c);
+            }
         }
         a.held.clear();
     }
@@ -967,6 +1101,7 @@ namespace rondelirium
         a.mesh = FWeakObjectPtr(mesh);
         a.cal = cal;
         a.alive = alive;
+        a.limp = !alive && head_kill(character);
         float at[3]{};
         a.agent = nm::api.agent_create(cal->build, at, 0.0f, 0.3f);
         if (!a.agent)
@@ -1183,6 +1318,29 @@ namespace rondelirium
         return cfg.weak_health + (cfg.stagger_health - cfg.weak_health) * health_left(character);
     }
 
+    // For bug reports, twice a second: how far each part of what they hold has left its place on the hand. It should stay 0
+    // (the hand carries it rigidly); if the game moves it too, this shows.
+    inline void watch_held(Agent& a, UObject* mesh)
+    {
+        if (!cfg.log || a.time < a.next_gun_diag) return;
+        a.next_gun_diag = a.time + 0.5;
+        for (auto& h : a.held)
+        {
+            UObject* root = h.root.Get();
+            if (!root) continue;
+            DTransform hand = bone_world(mesh, h.hand);
+            for (auto& p : h.parts)
+            {
+                UObject* c = p.comp.Get();
+                if (!c) continue;
+                DTransform w = world_of(c);
+                T now = compose(inverse(T{hand.pos, hand.rot}), T{w.pos, w.rot});
+                log(STR("[RoNDelirium]   {} {}: {:.0f} deg, {:.1f} cm off its place on the hand\n"), root->GetName(), c->GetName(),
+                    len(rotvec(mul(now.q, conj(p.on_hand.q)))) * 57.29578, len(now.p - p.on_hand.p));
+            }
+        }
+    }
+
     // One frame of one agent; false when it's done.
     //
     // Delirium runs free with its own body (its joints, their armature, its muscles, a floor at the level's), and the
@@ -1201,7 +1359,42 @@ namespace rondelirium
         // The healthier, the shorter: an unhurt one shrugs it off, one nearly gone reels the full stagger_time.
         double stagger_time = cfg.healthy_stagger + (cfg.stagger_time - cfg.healthy_stagger) * (1.0 - a.left)
                             + (std::max(a.hurt[2], a.hurt[3]) >= 0.4f ? 1.5 : 0.0);
-        if (a.time > (a.alive ? stagger_time + cfg.blend_out + 0.5 : cfg.duration)) return end(a, STR("time")), false;
+        // Tased: the stagger's clocks wait while the game holds them, then it ends as any does (down, or back to the animation).
+        if (a.shock)
+        {
+            double held = now_s - a.shock_since;
+            int state = game_tased(character);
+            bool arrested = being_arrested(character);
+            bool over = held >= cfg.taser_max || !a.alive || dead(character) || arrested;
+            if (held >= cfg.taser_min)
+            {
+                if (state == 0) over = true;
+                else if (state < 0 && held >= (a.shock_for > 0 ? a.shock_for : 4.0)) over = true;
+            }
+            if (over)
+            {
+                if (nm::api.msg_begin(a.agent, "electrocute") == 0)
+                {
+                    nm::api.msg_set_bool(a.agent, "start", 0);
+                    nm::api.msg_send(a.agent, a.world);
+                }
+                a.shock = false;
+                note(a, std::format("shock_over {:.1f}", held));
+                log(STR("[RoNDelirium]   the shock's over ({:.1f} s)\n"), held);
+                if (a.alive && arrested) return end(a, STR("being arrested")), false;
+                a.time = std::max(a.time, stagger_time - 0.4);
+                a.total = 0;
+                a.still = 0;
+            }
+            else
+            {
+                a.time = 0;
+                a.total = 0;
+                a.still = 0;
+            }
+        }
+        const double dead_for = a.limp ? cfg.headshot_duration : cfg.duration;
+        if (a.time > (a.alive ? stagger_time + cfg.blend_out + 0.5 : dead_for)) return end(a, STR("time")), false;
         if (!a.alive && a.total > cfg.dead_max) return end(a, STR("most a corpse gets")), false;
         // The game's physical animation off while Delirium drives, every frame: the game turns it on itself (for one
         // incapacitated, its writhing on the floor), and the two pulling the same bones stood the body half up, then flung it.
@@ -1212,6 +1405,7 @@ namespace rondelirium
             log(STR("[RoNDelirium]   {} ({:.1f} s{})\n"), killed(character) ? STR("killed") : STR("incapacitated"), a.time,
                 a.blend_left >= 0 ? STR(", blending back") : STR(""));
             a.alive = false;
+            a.limp = head_kill(character);
             note(a, killed(character) ? "killed" : "incapacitated");
             if (a.own)  // the game's death ragdoll takes these same bodies over: its weapon and capsule as it left them
             {
@@ -1401,7 +1595,7 @@ namespace rondelirium
         // Dying where they already lay (killed on the floor): limp, or the dying reaction braced to get up.
         // Dying: the reaction's stagger for its first moment only, then limp. Each bullet restarted it, and a corpse kept
         // on its feet by bullet after bullet jerked about standing (it danced) for seconds.
-        float health = a.alive ? live_health(character) : (a.head_start < 0.7 || a.total > 0.8) ? std::min(cfg.health, 20.0f) : cfg.health;
+        float health = a.alive ? (a.shock || a.shock_pending ? cfg.taser_health : live_health(character)) : (a.head_start < 0.7 || a.total > 0.8) ? std::min(cfg.health, 20.0f) : cfg.health;
         float from[3] = {float(a.hit.from.x), float(a.hit.from.y), float(a.hit.from.z)};
         const float* shooter = len(a.hit.from) > 0 ? from : nullptr;
         if (a.new_hit)
@@ -1416,20 +1610,20 @@ namespace rondelirium
             // The push by the health left: a light shove for an unhurt one, a hard one for one nearly gone (or dying).
             float left = a.alive ? a.left : 0.0f;
             // (global in the engine: set for each agent's own calls, the dying's lower)
-            nm::api.set_shot_body_stiffness(a.alive ? 0.0f : cfg.dying_stiffness);
-            nm::api.set_shot_force_scale(weapon_push(a.hit.weapon) / ENGINE_SHOT_FORCE * cfg.push_scale
+            nm::api.set_shot_body_stiffness(a.alive ? (a.shock || a.shock_pending ? cfg.taser_stiffness : 0.0f) : cfg.dying_stiffness);
+            nm::api.set_shot_force_scale(a.tase_first ? 0.0f : weapon_push(a.hit.weapon) / ENGINE_SHOT_FORCE * cfg.push_scale
                                          * (cfg.healthy_push + (cfg.weak_push - cfg.healthy_push) * (1.0f - left)));
             nm::api.agent_shot(a.agent, a.world, nullptr, hit, at, d, health, shooter);
             // The hand held on the wound this long, not GTA IV's 3 s: where Ready or Not's joint limits keep it off the
             // wound, the arm stayed jammed there, stiff, for the whole stagger.
             if (nm::api.msg_begin(a.agent, "shot") == 0)
             {
-                nm::api.msg_set_float(a.agent, "grabHoldTime", cfg.grab_time);
+                nm::api.msg_set_float(a.agent, "grabHoldTime", a.tase_first ? 0.0f : cfg.grab_time);
                 nm::api.msg_send(a.agent, a.world);
             }
             a.still = 0;
             // Firing back, blind, now and then: a burst a moment after the hit.
-            if (a.alive && !a.held.empty() && random(0, 1) < cfg.fire_back)
+            if (a.alive && !a.tase_first && !a.held.empty() && random(0, 1) < cfg.fire_back)
             {
                 a.fire_from = a.time + random(0.15, 0.45);
                 a.fire_until = a.fire_from + cfg.fire_burst * random(0.5, 1.5);
@@ -1437,7 +1631,7 @@ namespace rondelirium
             }
             // A bullet in a limb weakens it, by the weapon: a leg gives under them (they kneel or go down), an arm hangs.
             // More bullets in the same limb add up.
-            int limb = hit >= 14 && hit <= 16 ? 0 : hit >= 18 && hit <= 20 ? 1 : hit >= 1 && hit <= 3 ? 2 : hit >= 4 && hit <= 6 ? 3 : -1;
+            int limb = a.tase_first ? -1 : hit >= 14 && hit <= 16 ? 0 : hit >= 18 && hit <= 20 ? 1 : hit >= 1 && hit <= 3 ? 2 : hit >= 4 && hit <= 6 ? 3 : -1;
             if (limb >= 0)
             {
                 float amount = weapon_power(a.hit.weapon) * (limb >= 2 ? cfg.leg_injury : cfg.arm_injury);
@@ -1455,11 +1649,30 @@ namespace rondelirium
             log(STR("[RoNDelirium]   shot in {} ({}), health {:.0f} ({:.0f}% left), limb hurt {:.2f}\n"), BONE[hit],
                 a.hit.weapon ? to_wstring(a.hit.weapon) : StringType(STR("weapon unknown")), health, left * 100, limb >= 0 ? a.hurt[limb] : 0.0f);
             a.new_hit = false;
+            a.tase_first = false;
         }
         else
         {
-            nm::api.set_shot_body_stiffness(a.alive ? 0.0f : cfg.dying_stiffness);
+            nm::api.set_shot_body_stiffness(a.alive ? (a.shock || a.shock_pending ? cfg.taser_stiffness : 0.0f) : cfg.dying_stiffness);
             nm::api.agent_shot_update(a.agent, a.world, health, shooter);
+        }
+        if (a.shock_pending && a.alive)
+        {
+            a.shock_pending = false;
+            if (nm::api.msg_begin(a.agent, "electrocute") == 0)
+            {
+                nm::api.msg_set_bool(a.agent, "start", 1);
+                nm::api.msg_set_float(a.agent, "stunMag", cfg.taser_strength);
+                nm::api.msg_set_float(a.agent, "stunInterval", cfg.taser_interval);
+                nm::api.msg_set_float(a.agent, "largeMult", cfg.taser_large);
+                nm::api.msg_set_bool(a.agent, "applyStiffness", cfg.taser_stiff ? 1 : 0);
+                if (nm::api.msg_send(a.agent, a.world) == 0)
+                {
+                    a.shock = true;
+                    note(a, "shock");
+                }
+                else Output::send<LogLevel::Warning>(STR("[RoNDelirium] electrocute: {}\n"), to_wstring(nm::api.error()));
+            }
         }
 
         float step = std::clamp(dt, 1.0f / 240.0f, 0.25f);
@@ -1535,9 +1748,9 @@ namespace rondelirium
         // A dead body's last seconds: Delirium's hold eases off, so the ragdoll goes limp gently and not all at once
         // when it's let go (it dropped, a plop, held in Delirium's pose until the last frame).
         double hold = 1.0;
-        if (!a.alive && cfg.fade > 0)
+        if (const double fade = a.limp ? dead_for : cfg.fade; !a.alive && fade > 0)
         {
-            double x = std::clamp((cfg.duration - a.time) / cfg.fade, 0.0, 1.0);
+            double x = std::clamp((dead_for - a.time) / fade, 0.0, 1.0);
             hold = x * x * (3 - 2 * x);
         }
         std::map<StringType, bool> done;
@@ -1599,6 +1812,7 @@ namespace rondelirium
         if (a.own)
         {
             capsule_follow(character, part[0].p);
+            watch_held(a, mesh);
         }
         // The recording's poses: Delirium's parts, then the game's bodies (this frame's, as the puppet read them).
         if (a.tape && a.clock >= a.next_frame)
@@ -1635,6 +1849,77 @@ namespace rondelirium
         return active && *active && (*active)->GetName().ends_with(STR("_V2"));
     }
 
+    // ---- the taser ----
+
+    inline constexpr uint8 ST_TASED = 1;  // EStunType
+    struct Tase { FWeakObjectPtr character; float length; double until; const CharType* how; };
+    inline std::vector<Tase> tases;  // signals that someone's been tased, waiting for the next tick
+
+    inline void tase_signal(UObject* c, float length, const CharType* how)
+    {
+        if (!cfg.taser || !c) return;
+        for (auto& t : tases)
+        {
+            if (t.character.Get() != c) continue;
+            t.length = std::max(t.length, length);
+            return;
+        }
+        tases.push_back({FWeakObjectPtr(c), length, now_s + 0.5, how});
+    }
+
+    // True when this signal is finished with (taken, or not one to take).
+    inline bool on_tased(Tase& t)
+    {
+        UObject* c = t.character.Get();
+        if (!c) return true;
+        if (!cfg.enabled || !v2(c)) return true;
+        if (dead(c) || being_arrested(c)) return true;
+        // The game's own word when it has one; a signal may come a moment before its state changes.
+        if (t.length <= 0 && game_tased(c) == 0)
+        {
+            if (now_s <= t.until) return false;
+            log(STR("[RoNDelirium] {}: a taser signal ({}), but the game doesn't have them tased\n"), c->GetName(), t.how);
+            return true;
+        }
+        for (auto& a : agents)
+        {
+            if (a.character.Get() != c) continue;
+            if (!a.alive) return true;
+            if (!a.shock) a.shock_pending = true;
+            a.shock_since = now_s;
+            a.shock_for = t.length;
+            a.blend_left = -1;
+            if (auto mesh = a.mesh.Get(); a.own && mesh) blend(mesh, peak_blend(a));
+            log(STR("[RoNDelirium] {} tased ({}), already reacting\n"), c->GetName(), t.how);
+            return true;
+        }
+        log(STR("[RoNDelirium] {} tased ({}, {:.1f} s)\n"), c->GetName(), t.how, t.length);
+        if (std::none_of(tracked.begin(), tracked.end(), [&](const FWeakObjectPtr& x) { return x.Get() == c; })) tracked.emplace_back(c);
+        if (flag(c, STR("IsInRagdoll"))) start(c, true);
+        else
+        {
+            Agent* a = start(c, true);
+            UObject* mesh = a ? a->mesh.Get() : nullptr;
+            if (a && !(mesh && own_physics_on(*a, c, mesh)))
+            {
+                end(*a, STR("no ragdoll setup"));
+                agents.pop_back();
+                return true;
+            }
+        }
+        for (auto& a : agents)
+        {
+            if (a.character.Get() != c) continue;
+            a.hit = Hit{};
+            a.left = health_left(c);
+            a.tase_first = true;
+            a.shock_pending = true;
+            a.shock_since = now_s;
+            a.shock_for = t.length;
+        }
+        return true;
+    }
+
     // A character just hit: a new reaction if Delirium already drives them, their ragdoll if they're in one, else a stagger.
     inline void on_shot(UObject* c)
     {
@@ -1656,6 +1941,7 @@ namespace rondelirium
             a.new_hit = true;  // the running shot task takes it as its next hit
             // A corpse still being riddled stays Delirium's: each bullet gives it duration seconds more, up to dead_max.
             if (!a.alive) a.time = 0;
+            if (!a.alive && head_kill(c)) a.limp = true;  // still dying, and now shot in the head
             if (a.alive)
             {
                 a.left = health_left(c);
@@ -1732,6 +2018,7 @@ namespace rondelirium
             if (auto c = s.Get()) on_shot(c);
         }
         shot.clear();
+        std::erase_if(tases, [](Tase& t) { return on_tased(t); });
         for (auto& p : pending)
         {
             if (auto c = p.Get(); c && v2(c) && !was_released(c)) start(c, !dead(c));
@@ -1745,6 +2032,26 @@ namespace rondelirium
             {
                 UObject* c = t.Get();
                 if (!driving(c) && !was_released(c) && v2(c) && flag(c, STR("IsInRagdoll"))) start(c, !dead(c));
+            }
+            // Tased, and no signal came (none of the game's taser calls has been seen to pass a hook): the game's state says
+            // so, four times a second. For everyone, not just those already hit: most are tased unhurt.
+            static double next_look = 0;
+            if (cfg.taser && now_s >= next_look)
+            {
+                next_look = now_s + 0.25;
+                {
+                    std::lock_guard guard(born_lock);
+                    people.insert(people.end(), born.begin(), born.end());
+                    born.clear();
+                }
+                std::erase_if(people, [](const FWeakObjectPtr& t) { return t.Get() == nullptr; });
+                auto look = [](UObject* c) {
+                    if (!c || !v2(c) || dead(c) || game_tased(c) != 1) return;
+                    if (std::any_of(agents.begin(), agents.end(), [&](const Agent& a) { return a.character.Get() == c && (a.shock || a.shock_pending); })) return;
+                    tase_signal(c, 0.0f, STR("state"));
+                };
+                for (auto& t : people) look(t.Get());
+                for (auto& t : tracked) look(t.Get());  // (made before the mod could see it)
             }
         }
         std::erase_if(agents, [&](Agent& a) { return !tick(a, dt); });
@@ -1813,6 +2120,7 @@ namespace rondelirium
                 h.dir = to_nm_point(struct_param<DVec>(ctx, blood, STR("Hit"), STR("TraceEnd"))) - h.from;
                 h.weapon = weapon_of(param<UObject*>(ctx, blood, STR("HitInstigator")));
                 last_hits[ctx.Context] = h;
+                note_head_hit(ctx.Context, h.bone);
                 if (std::none_of(shot.begin(), shot.end(), [&](const FWeakObjectPtr& s) { return s.Get() == ctx.Context; })) shot.emplace_back(ctx.Context);
             }, noop, nullptr);
             ++hooks;
@@ -1825,6 +2133,13 @@ namespace rondelirium
             UObjectGlobals::RegisterHook(point, [point](UnrealScriptFunctionCallableContext& ctx, void*) {
                 UObject* c = ctx.Context;
                 if (!c || !v2(c)) return;  // doors, props, the player and the SWAT
+                // The taser's probes aren't a bullet.
+                if (UObject* type = param<UObject*>(ctx, point, STR("DamageType")); cfg.taser && type && type->GetName().find(STR("Taser")) != StringType::npos)
+                {
+                    log(STR("[RoNDelirium] {}: taser damage\n"), c->GetName());
+                    tase_signal(c, 0.0f, STR("damage"));
+                    return;
+                }
                 if (std::any_of(shot.begin(), shot.end(), [&](const FWeakObjectPtr& s) { return s.Get() == c; })) return;  // the blood hook has it
                 Hit h;
                 h.bone = param<FName>(ctx, point, STR("BoneName")).ToString();
@@ -1842,10 +2157,65 @@ namespace rondelirium
                 }
                 log(STR("[RoNDelirium] point damage to {} in {} ({:.0f})\n"), c->GetName(), h.bone, param<float>(ctx, point, STR("Damage")));
                 last_hits[c] = h;
+                note_head_hit(c, h.bone);
                 shot.emplace_back(c);
             }, noop, nullptr);
             ++hooks;
         }
+        // The taser, by every way the game may tell: which of these fire shows in the log. Calls made inside the game's own
+        // code don't pass through a hook, hence several, and the state read in tick_all for those already seen.
+        if (auto stun = function(STR("/Script/ReadyOrNot.ReadyOrNotCharacter:StartStun")))
+        {
+            UObjectGlobals::RegisterHook(stun, [stun](UnrealScriptFunctionCallableContext& ctx, void*) {
+                log(STR("[RoNDelirium] {}: StartStun, type {}\n"), ctx.Context ? ctx.Context->GetName() : StringType(STR("?")), param<uint8>(ctx, stun, STR("StunType")));
+                if (param<uint8>(ctx, stun, STR("StunType")) == ST_TASED) tase_signal(ctx.Context, param<float>(ctx, stun, STR("Duration")), STR("StartStun"));
+            }, noop, nullptr);
+            ++hooks;
+        }
+        else log(STR("[RoNDelirium] no StartStun\n"));
+        for (auto path : {STR("/Script/ReadyOrNot.ReadyOrNotCharacter:StartBeingTasered"), STR("/Script/ReadyOrNot.CyberneticCharacter:StartBeingTasered"),
+                          STR("/Script/ReadyOrNot.ReadyOrNotCharacter:Multicast_PlayTaserHitEffect"), STR("/Script/ReadyOrNot.CyberneticCharacter:Multicast_PlayTaserHitEffect"),
+                          STR("/Script/ReadyOrNot.ReadyOrNotCharacter:ReactToTaser"), STR("/Script/ReadyOrNot.CyberneticCharacter:ReactToTaser"),
+                          STR("/Script/ReadyOrNot.Taser:Multicast_PlayTaserHitEffect"), STR("/Script/ReadyOrNot.Taser:OnTaserStunDelivered"),
+                          STR("/Script/ReadyOrNot.Taser:Server_DeliverStunToAttachedTarget")})
+        {
+            auto fn = function(path);
+            if (!fn) continue;
+            log(STR("[RoNDelirium] taser hook: {}\n"), path);
+            UObjectGlobals::RegisterHook(fn, noop, [path](UnrealScriptFunctionCallableContext& ctx, void*) {
+                UObject* c = ctx.Context;
+                if (!c) return;
+                // On the weapon: the one it has tased.
+                if (auto target = c->GetValuePtrByPropertyNameInChain<UObject*>(STR("StunnedCharacter")))
+                {
+                    if (!*target)
+                    {
+                        log(STR("[RoNDelirium] {}: no one tased yet\n"), path);
+                        return;
+                    }
+                    c = *target;
+                }
+                tase_signal(c, 0.0f, path);
+            }, nullptr);
+            ++hooks;
+        }
+        // Every suspect and civilian as they're made, for the taser's watch in tick_all. (Called for every object in the
+        // game and from loading threads too, hence the classes found here and nothing else looked up.)
+        static UClass* suspect_class = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Script/ReadyOrNot.SuspectCharacter"));
+        static UClass* civilian_class = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Script/ReadyOrNot.CivilianCharacter"));
+        if (suspect_class || civilian_class)
+        {
+            // (Read-only: the older form without data "returned" the object, and UE4SS logged an error for each one made.)
+            Hook::RegisterStaticConstructObjectPostCallback([](const auto& data, const FStaticConstructObjectParameters&) {
+                UObject* made = data.GetCurrentResolvedReturnValue();
+                if (made && ((suspect_class && made->IsA(suspect_class)) || (civilian_class && made->IsA(civilian_class))) && !made->HasAnyFlags(RF_ClassDefaultObject))
+                {
+                    std::lock_guard guard(born_lock);
+                    born.emplace_back(made);
+                }
+            }, {false, true, STR("RoNDelirium"), STR("People")});
+        }
+        else log(STR("[RoNDelirium] no suspect or civilian class: the taser's only seen on those already hit\n"));
         log(STR("[RoNDelirium] {} hooks in\n"), hooks);
         Hook::RegisterEngineTickPostCallback([](auto&, UEngine*, float dt, bool) { tick_all(dt); }, {false, false, STR("RoNDelirium"), STR("Tick")});
     }

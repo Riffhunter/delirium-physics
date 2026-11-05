@@ -15,11 +15,9 @@ CALIBRATION.md explains the method and the order to run these in. RON_RECORDINGS
   calrec.py self <dll> <ref.json>                     GTA IV against itself with other jitter seeds: the noise floor
   calrec.py eval <dll> <ref.json> [K=V,...]           our side with the tries: prints the cost and its parts
   calrec.py sens <dll> <ref.json> <kv_own.txt> [char keys...]  each value down and up alone, the cost's change
-  calrec.py parts <dll> <ref.json> [K=V,...]          the same, one line, readable
   calrec.py descend <dll> <ref.json> <kv_own.txt> <keys,...> [start K=V,...]  coordinate descent on those keys
-  calrec.py cma <dll> <ref.json> <kv_own.txt> <keys,...> <start K=V,...> <evals> <log>  many keys at once (needs numpy)
-Tries: a number is a kv slot (NM_KV_TRY), 'dying' the dying body's stiffness (the mod's dying_stiffness), 'force' the
-mod's push_scale, any other name a character variant key (charvariant.py) on the base character. CALREC_SET=train|val|all (default all): the
+Tries: a number is a kv slot (NM_KV_TRY), 'dying' the dying body's stiffness (the mod's dying_stiffness), any other
+name a character variant key (charvariant.py) on the base character. CALREC_SET=train|val|all (default all): the
 cases with an even or odd index in the ref, so one half fits and the other checks."""
 import concurrent.futures as cf, json, math, os, re, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -34,7 +32,46 @@ K_OURS, K_GTA, JIT = 4, 8, 1e-4
 DYING = 6.0  # the mod's dying_stiffness (delirium.ini) unless tried
 ADDITIVE = dict(rc=0.4, ru=0.4, rf=0.4, rh=0.4, rt=0.2, rs=0.2, rp=0.2, rn=0.2, rk=0.2, sh1=0.1, sh2=0.1, sht=0.1, cl1=0.1, cl2=0.1, el=0.1)
 SCALE = dict(arms=0.10, kick_chest=10.0, kick_hands=0.15, kick_head=0.10, whip=0.10, along=0.30, steps=2.0, toward=1.0,
-             reach=0.15, neck=0.15, elbow=20.0, fall=0.5, when=0.5, travel=0.5)
+             reach=0.15, neck=0.15, elbow=20.0, fall=0.5, when=0.5, travel=0.5, dir_chest=10.0, dir_pelvis=10.0, dir_head=0.08)
+# The terms the cost had before the direction ones: costs of different versions compare on these (old_cost)
+OLD_TERMS = ('arms', 'kick_chest', 'kick_hands', 'kick_head', 'whip', 'along', 'steps', 'toward', 'reach', 'neck', 'elbow', 'fall', 'when', 'travel')
+DIR_TIMES = (0.1, 0.2, 0.4)
+FIT_WEIGHT = dict(whip=0.0)  # in the total a search minimises; dir_head holds the whip with its direction (the size alone rewarded a head flopping any way)
+FIT_WEIGHT.update({k: float(v) for k, v in (x.split('=') for x in os.environ.get('CALREC_FIT_WEIGHT', '').split(',') if x)})
+
+
+def _sub(a, b): return [a[i] - b[i] for i in range(3)]
+def _dot(a, b): return sum(a[i] * b[i] for i in range(3))
+def _cross(a, b): return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+def _unit(a): n = math.sqrt(_dot(a, a)) or 1.0; return [x / n for x in a]
+
+
+def body_frame(f):
+    """Right, forward, up from the shoulders and the trunk: the same anatomy on any character, whatever its parts' axes."""
+    n = f['nm']
+    up = _unit(_sub(n[CHEST][:3], n[PELVIS][:3])); right = _unit(_sub(n[18][:3], n[14][:3]))
+    fwd = _unit(_cross(up, right))
+    return _unit(_cross(fwd, up)), fwd, up
+
+
+def rotation_vector(q0, q1):
+    q = qmul(tuple(q1), conj(tuple(q0)))
+    if q[3] < 0: q = tuple(-x for x in q)
+    n = math.hypot(q[0], q[1], q[2])
+    return [q[i] / n * math.degrees(2 * math.atan2(n, q[3])) for i in range(3)] if n > 1e-9 else [0.0] * 3
+
+
+def direction_features(fr):
+    """The chest's and pelvis's turns (deg) and the head against the chest (m), each at DIR_TIMES, in the body's frame at the start."""
+    f0 = fr[0]; axes = body_frame(f0); rel0 = _sub(f0['nm'][HEAD][:3], f0['nm'][CHEST][:3])
+    chest, pelvis, head = [], [], []
+    for t in DIR_TIMES:
+        f = at(fr, t)
+        rc = rotation_vector(f0['nm'][CHEST][3:7], f['nm'][CHEST][3:7]); rp = rotation_vector(f0['nm'][PELVIS][3:7], f['nm'][PELVIS][3:7])
+        rel = _sub(_sub(f['nm'][HEAD][:3], f['nm'][CHEST][:3]), rel0)
+        for ax in axes:
+            chest.append(_dot(rc, ax)); pelvis.append(_dot(rp, ax)); head.append(_dot(rel, ax))
+    return chest, pelvis, head
 
 
 def at(fr, t):
@@ -76,6 +113,7 @@ def run_features(fr, info):
     o['kick_hands'] = (math.dist(f0['nm'][16][:3], f1['nm'][16][:3]) + math.dist(f0['nm'][20][:3], f1['nm'][20][:3])) / 2
     o['kick_head'] = math.dist(f0['nm'][HEAD][:3], f1['nm'][HEAD][:3])
     o['whip'] = max(math.dist(in_chest(f0, HEAD), in_chest(f, HEAD)) for f in fr if f['t'] - t0 <= 0.2)
+    o['dir_chest'], o['dir_pelvis'], o['dir_head'] = direction_features(fr)
     fe = at(fr, 1.0)
     o['along'] = (fe['nm'][PELVIS][0] - f0['nm'][PELVIS][0]) * u[0] + (fe['nm'][PELVIS][1] - f0['nm'][PELVIS][1]) * u[1]
     steps = toward = 0
@@ -107,6 +145,8 @@ def features(runs, info):
         vals = [p[key] for p in per if p[key] is not None]
         if key == 'arms':
             out[key] = {k: [sum(v[k][j] for v in vals) / len(vals) for j in range(3)] for k in ARMS} if vals else None
+        elif key.startswith('dir_'):
+            out[key] = [sum(v[i] for v in vals) / len(vals) for i in range(len(vals[0]))]
         elif key == 'fell':
             out['fell_p'] = len(vals) / len(per); out[key] = sum(vals) / len(vals) if vals else None
         else:
@@ -120,24 +160,43 @@ def cost(ref, mine, names=None):
     unstable = 0
     for name in names:
         g, o = ref[name], mine[name]
-        flat = [v for k, v in o.items() if isinstance(v, float)] + ([x for a in o['arms'].values() for x in a] if o.get('arms') else [])
+        flat = [v for k, v in o.items() if isinstance(v, float)] + ([x for a in o['arms'].values() for x in a] if o.get('arms') else []) + [x for k in ('dir_chest', 'dir_pelvis', 'dir_head') for x in (o.get(k) or [])]
         if any(math.isnan(v) or math.isinf(v) for v in flat):
             unstable += 1; continue  # a body Delirium lost: a penalty below instead of its parts
         if g['arms'] and o['arms']:
             parts['arms'] += sum(math.dist(o['arms'][k], g['arms'][k]) for k in ARMS) / 4 / SCALE['arms']
         for k in ('kick_chest', 'kick_hands', 'kick_head', 'whip', 'along', 'steps', 'toward', 'reach', 'neck', 'elbow', 'travel'):
             if g.get(k) is not None and o.get(k) is not None: parts[k] += abs(o[k] - g[k]) / SCALE[k]
+        for k in ('dir_chest', 'dir_pelvis', 'dir_head'):
+            if g.get(k) and o.get(k): parts[k] += sum(abs(a - b) for a, b in zip(o[k], g[k])) / len(g[k]) / SCALE[k]
         parts['fall'] += abs(o['fell_p'] - g['fell_p']) / SCALE['fall']
         if o['fell'] is not None and g['fell'] is not None: parts['when'] += abs(o['fell'] - g['fell']) / SCALE['when']
     n = max(len(names), 1)
     parts = {k: v / n / len(SCALE) for k, v in parts.items()}
     parts['unstable'] = 0.3 * unstable  # each case with a lost body costs more than any fit could gain
-    return sum(parts.values()), parts
+    return sum(v * FIT_WEIGHT.get(k, 1.0) for k, v in parts.items()), parts
+
+
+def no_push_terms(dll, ref_np, names, engine):
+    """The body's own reaction: our chest's turn and head against GTA IV's with no push, case by case and on average over the
+    cases (a bias the case-by-case part hides in its noise). CALREC_NP_EVERY: one case in so many (cost per evaluation)."""
+    use = [n for n in names if n in ref_np][::int(os.environ.get('CALREC_NP_EVERY', '2'))]
+    os.environ['REPLAY_FORCE'] = '0.0001'
+    mine = {os.path.basename(c['path']): c for c in run_cases(dll, [ref_np[n]['path'] for n in use], engine, K_OURS)}
+    use = [n for n in use if mine[n].get('dir_chest')]
+    w = float(os.environ.get('CALREC_NP_WEIGHT', '3')) / len(SCALE)
+    out = {}
+    for key, tag, scale in (('dir_chest', 'chest', SCALE['dir_chest']), ('dir_head', 'head', SCALE['dir_head'])):
+        each = sum(abs(a - b) for n in use for a, b in zip(mine[n][key], ref_np[n][key])) / len(use) / 9
+        means = [sum(mine[n][key][i] - ref_np[n][key][i] for n in use) / len(use) for i in range(9)]
+        out['np_' + tag] = w * each / scale
+        out['np_bias_' + tag] = w * sum(abs(x) for x in means) / 9 / scale
+    return out
 
 
 def recs(args):
-    from rec import find
     assert args or GAME, 'give the recordings, or set RON_RECORDINGS to their folder'
+    from rec import find
     return [p for p in find(args or [GAME]) if 'ref ' in open(p, encoding='utf-8', errors='replace').read(400000)]
 
 
@@ -225,6 +284,13 @@ if __name__ == '__main__':
         ref = {os.path.basename(c['path']): c for c in res if c['info']}
         json.dump(ref, open(out, 'w'), indent=1)
         print(len(ref), 'cases')
+    elif cmd == 'npref':  # calrec.py npref <dll> <ref.json> <out.json>: GTA IV with no push, on the living cases (local only, like every reference)
+        from rec import Rec
+        ref = json.load(open(sys.argv[3])); names = [n for n in sorted(ref) if Rec(ref[n]['path']).alive]
+        os.environ['REPLAY_GTA_PUSH'] = '0.0001'
+        res = run_cases(dll, [ref[n]['path'] for n in names], 'gta', K_GTA)
+        out = {os.path.basename(c['path']): dict(path=c['path'], dir_chest=c['dir_chest'], dir_head=c['dir_head']) for c in res if c.get('info')}
+        json.dump(out, open(sys.argv[4], 'w'), indent=1); print(len(out), 'cases')
     elif cmd == 'self':  # GTA IV against itself: other seeds, the same count of runs as ours
         ref = json.load(open(sys.argv[3])); names = subset(ref)
         res = run_cases(dll, [ref[n]['path'] for n in names], 'gta', K_OURS, seed0=900)
@@ -238,12 +304,16 @@ if __name__ == '__main__':
         res = run_cases(dll, [ref[n]['path'] for n in names], os.environ.get('CALREC_ENGINE', 'own'), K_OURS)  # another: diagnosis
         mine = {os.path.basename(c['path']): c for c in res}
         c, parts = cost(ref, mine, names)
+        if os.environ.get('CALREC_NP'):
+            np_parts = no_push_terms(dll, json.load(open(os.environ['CALREC_NP'])), names, os.environ.get('CALREC_ENGINE', 'own'))
+            parts.update(np_parts); c += sum(np_parts.values())
         print(json.dumps(dict(cost=c, parts=parts, mine=mine)))
     elif cmd == 'parts':  # calrec.py parts <dll> <ref.json> [tries]: the cost's parts, ours against GTA IV's
         p = subprocess.run([sys.executable, '-I', os.path.abspath(__file__), 'eval', dll, sys.argv[3]],
                            env=env_for(parse(sys.argv[4] if len(sys.argv) > 4 else '')), capture_output=True, text=True)
         r = json.loads(p.stdout.strip().splitlines()[-1])
-        print(round(r['cost'], 4), ' '.join(f'{k} {v:.3f}' for k, v in r['parts'].items()))
+        old = sum(r['parts'][k] for k in OLD_TERMS) * len(SCALE) / len(OLD_TERMS)
+        print(round(r['cost'], 4), f'old_cost {old:.4f}', ' '.join(f'{k} {v:.3f}' for k, v in r['parts'].items()))
     elif cmd == 'sens':
         ref_path, table = sys.argv[3], sys.argv[4]
         vals = kv_values(table)
@@ -265,7 +335,7 @@ if __name__ == '__main__':
         ref_path, table, keys = sys.argv[3], sys.argv[4], sys.argv[5].split(',')
         vals = kv_values(table)
         cur = parse(sys.argv[6] if len(sys.argv) > 6 else '')
-        start = lambda k: cur.get(k, vals.get(k, DYING if k == 'dying' else 1.0 if k[:2] in ('w_', 'm_') or k[:3] in ('mb_', 'mp_', 'cs_') or k in ('arm', 'shw', 'force') else 0.0))
+        start = lambda k: cur.get(k, vals.get(k, DYING if k == 'dying' else 1.0 if k[:2] in ('w_', 'm_', 's_', 'd_') or k[:3] in ('mb_', 'mp_', 'cs_', 'ms_') or k in ('arm', 'shw', 'force') else 0.0))
         best = run_eval(dll, ref_path, cur); print('start', round(best, 4), show(cur), flush=True)
         for rnd in range(4):
             improved = False
@@ -290,8 +360,8 @@ if __name__ == '__main__':
         ref_path, table, keys = sys.argv[3], sys.argv[4], sys.argv[5].split(',')
         cur = parse(sys.argv[6]); budget = int(sys.argv[7]); log = open(sys.argv[8], 'a', encoding='utf-8')
         vals = kv_values(table)
-        v0 = {k: cur.get(k, vals.get(k, DYING if k == 'dying' else 1.0 if k[:2] in ('w_', 'm_') or k[:3] in ('mb_', 'mp_', 'cs_') or k in ('arm', 'shw', 'force') else 0.0)) for k in keys}
-        lin = {k: ADDITIVE.get(k, 0.15) for k in keys if k in ADDITIVE or k.startswith('jr_')}
+        v0 = {k: cur.get(k, vals.get(k, DYING if k == 'dying' else 1.0 if k[:2] in ('w_', 'm_', 's_', 'd_') or k[:3] in ('mb_', 'mp_', 'cs_', 'ms_') or k in ('arm', 'shw', 'force') else 0.0)) for k in keys}
+        lin = {k: ADDITIVE.get(k, 0.05 if k.startswith('lim_') else 0.15) for k in keys if k in ADDITIVE or k.startswith(('jr_', 'lim_'))}
         def decode(x):
             t = dict(cur)
             for i, k in enumerate(keys): t[k] = v0[k] + x[i] * lin[k] if k in lin else v0[k] * math.exp(0.25 * x[i])

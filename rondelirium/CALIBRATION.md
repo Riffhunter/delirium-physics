@@ -18,7 +18,12 @@ The cost is a sum of 14 scaled differences. Lower is better, and 0 would be iden
 | Early calibration with coordinate descent (mod 1.1) | 0.79 |
 | Search on the character's arms and 14 engine values (v3) | 0.72 |
 | Search on neck, head and spine (v4, mod 1.3) | 0.68 |
-| The reference against itself, other random seeds: the most you can expect (184 cases) | 0.12 |
+| The reference against itself, other random seeds: the most you can expect (184 cases) | 0.076 |
+
+Those use the older reference. On the current one, over the 184 cases and with the three direction terms added below, mod 1.3 scores
+0.818 and mod 1.4 0.778. On the cases the search never saw, 1.3 scores 0.836 and 1.4 0.791 (mean of seven runs with each number
+shaken by about 1%, because the system's chaotic). 1.4 is still worse on the head's kick (0.087 against 0.079). The author's in-game
+tests liked its reactions.
 
 So it's close in play, and the author's in-game tests call it almost the same, but it isn't solved. On 184 cases,
 mod 1.3 follows the reference well on falls and how far they travel, and hardly at all on the head's whip:
@@ -150,6 +155,11 @@ All of it is about what a player sees, averaged over a case's runs. `calrec.py` 
 | `neck` | The hands' distance to the neck after 1.5 s |
 | `elbow` | How bent the elbows are while on their feet |
 | `fall`, `when`, `travel` | Whether they fall, when, and how far they go |
+| `dir_chest`, `dir_pelvis`, `dir_head` | Chest and pelvis turn and the head against the chest, at 0.1, 0.2 and 0.4 s, in the body's own frame |
+
+`CALREC_NP=<ref>` adds the same chest and head comparison with almost no push, case by case and averaged over the cases (make the
+reference with `calrec.py npref`, and keep it to yourself like the other one). `old_cost` is the total without the direction terms,
+to compare with older versions. `CALREC_FIT_WEIGHT=term=2` weighs a term more in a search only.
 
 ## What we learned
 
@@ -158,12 +168,27 @@ All of it is about what a player sees, averaged over a case's runs. `calrec.py` 
   why `cma` and not `descend` found it.
 - **Split the gap between character and numbers.** Running the reference's character on your engine values
   (`CALREC_ENGINE=gta_char python calrec.py parts $D fit_ref.json force=1.45`) shows how much of the gap each one holds.
-  For us it gave 0.58 against the reference's 0.12 and our 0.69, so both still have a share.
+  For us it gave 0.58 against the reference's 0.076 and our 0.69, so both still have a share.
 - **Matching averages isn't matching behaviour.** Over all cases, the head whip's size is off by under 20%, yet its
   correlation with the reference is 0: it doesn't respond to where the bullet went. Check correlation across cases
   (`diagnose.py corr`).
-- **Compare directions, not only sizes.** Every term in the cost is a size, so a search can't see a head moving the
-  wrong way by the right amount. This is the next improvement for this project.
+- **Compare directions, not only sizes.** With sizes alone, a search can't see a head moving the wrong way by the right
+  amount, and it was rewarding a floppy neck. The `dir_` terms fixed that. The whip's size is left out of the total a search
+  minimises, since `dir_head` holds it with its direction.
+- **Muscles' zero is the middle of the joint's range.** So moving a range's centre (`lim_<joint>_<axis>`) moves the posture
+  the body settles into. Here that was the only strong lever on the trunk's hunch. Strength, damping, muscle stiffness and
+  physical masses did nothing, and other keys moved it by 1-2 degrees. Too far and it explodes: the pose ends up outside the range.
+- **Undo a search's best one key at a time.** A gate failed after a long search, and a second search weighted towards it
+  overfitted and did worse on unseen cases. Putting one key back by hand (`cs_head=1`) and moving one neck range a little passed them
+  all: the search had moved the head's centre for a small gain and paid in head kick.
+- **Measure the noise before believing a gain.** Tiny changes move this cost by about 0.005, and a term like `travel` by 25%.
+  Shake every number by about 1% several times and compare the spreads, for your candidate and for what it replaces.
+- **An `unstable` flag is worth opening.** One case in ours goes non-finite in the first step after a resync, in about 2% of its
+  replays, and costs 0.3 when it lands in a run. The rate is the same on the old values and the new, so it isn't the candidate's doing,
+  and the mod hands such a body to the game's ragdoll. Its cause in the solver is still open. Count a rate over many seeds before
+  blaming, or clearing, a candidate.
+- **Measure by the route the game runs.** A diagnostic that loaded the character another way gave a different head position than the
+  built-in route, enough to pass a candidate that failed. Check any new number against the final DLL before believing it.
 - **Take the bullet away.** Replaying with almost no push (`diagnose.py body`) separates the body's own reaction from
   the impulse. A chest that seemed to go back too far turned out to be mostly a missing forward hunch, which no push
   value could have fixed.

@@ -11,7 +11,7 @@ usage: charvariant.py <in.json> <out.json> [key=value ...]
   rc, ru, rf, rh  clavicle / upper arm / forearm / hand roll about its bone (rad, the right side mirrored)
   rt, rs, rp      thigh / shin / foot roll; rn, rk neck / head roll
   w_<joint>       those joints' ranges widened about their middle; m_, mb_, mp_<group> masses; jr_<group>_<a|b|t> joint axes
-                  turned; cs_<group> part centres moved along the bone (see the comments below)"""
+                  turned; cs_<group> part centres moved along the bone; lim_<joint>_<axis> ranges moved (see the comments below)"""
 import json, sys
 
 src, dst = sys.argv[1], sys.argv[2]
@@ -104,6 +104,20 @@ for key, th in p.items():
             sgn = 1.0 if sum(x * y for x, y in zip(u, [uL[0], -uL[1], -uL[2]])) >= 0 else -1.0
         tw = rot(j['twist_axis'], u, sgn * th); le = rot(j['lean_axis'], u, sgn * th)
         j['twist_axis'], j['lean_axis'] = tw, le
+# s_<joint prefix>, d_<joint prefix>, ms_<joint prefix>: those joints' strength, damping and muscle stiffness scaled.
+for key, f in p.items():
+    for pre, field in (('s_', 'strength'), ('d_', 'damping'), ('ms_', 'muscle_stiffness')):
+        if key.startswith(pre) and f != 1.0:
+            for j in c['joints']:
+                if j['name'].startswith(key[len(pre):]): j[field] *= f
+# lim_<joint prefix>_<axis>: those joints' range moved along that axis (rad), the right side's flipped axes the other way.
+for key, d in p.items():
+    if key.startswith('lim_') and d:
+        group, axis = key[4:].rsplit('_', 1); axis = int(axis)
+        for j in c['joints']:
+            if j['name'].startswith(group):
+                sg = -1.0 if (j['name'].endswith('_right') and j['flip'][axis]) else 1.0
+                j['limits'][axis] = [j['limits'][axis][0] + d * sg, j['limits'][axis][1] + d * sg]
 # cs_<group>: that group's parts' centres (where their mass sits, and their bodies) moved along the line from the
 # part's own joint: their distance from it times this. Groups: spine (spine0-2), chest (spine3), neck, head, legs
 # (thighs, shins), feet, arms (upper arms, forearms), hands.

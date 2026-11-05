@@ -56,6 +56,7 @@ weapons_push = [28, 32, 45, 52, 10]
 stats = dict(agents=0, sim_seconds=0.0, steps=0, bad=0, step_errors=0, worst_speed=0.0, worst_spin=0.0, falls=0, deaths=0, resyncs=0,
              hits=0, worst_step_ms=0.0, bad_cases=[])
 t_start = time.time()
+SHOCK = bool(os.environ.get('SOAK_SHOCK'))
 for n in range(agents):
     w, kind = world()
     fit = None
@@ -83,7 +84,7 @@ for n in range(agents):
     shooter = [rnd.uniform(-6, 6), rnd.uniform(-8, -3), 1.6]
     hit_times = sorted(rnd.uniform(0, secs * 0.7) for _ in range(rnd.randint(1, 10)))
     dt_choice = rnd.choice([1 / 30, 1 / 60, 1 / 90, 1 / 144, 1 / 240, None])
-    t = 0.0; dead = False
+    t = 0.0; dead = False; shock_on = False
     while t < secs:
         dt = dt_choice or rnd.uniform(1 / 240, 1 / 25)
         if die_at is not None and not dead and t >= die_at:
@@ -107,6 +108,17 @@ for n in range(agents):
                 v = (C.c_float * 3)(); ww = (C.c_float * 3)(); lib.nm_agent_get_part_velocity(a, k, v, ww)
                 st += [x + rnd.uniform(-0.03, 0.03) for x in p] + q + list(v) + list(ww)
             lib.nm_agent_set_part_states(a, F(*st), 21); stats['resyncs'] += 1
+        if SHOCK and rnd.random() < 0.01:  # the taser: on or off at random, as RoNDelirium sends it (either stiffness, every strength)
+            shock_on = not shock_on
+            assert lib.nm_msg_begin(a, b"electrocute") == 0
+            lib.nm_msg_set_bool(a, b"start", int(shock_on))
+            if shock_on:
+                lib.nm_msg_set_float(a, b"stunMag", C.c_float(rnd.choice([0.5, 2, 4, 8])))
+                lib.nm_msg_set_float(a, b"stunInterval", C.c_float(rnd.choice([0.02, 0.05, 0.07, 0.15])))
+                lib.nm_msg_set_float(a, b"largeMult", C.c_float(rnd.choice([1, 2, 4])))
+                lib.nm_msg_set_bool(a, b"applyStiffness", rnd.randint(0, 1))
+            assert lib.nm_msg_send(a, w) == 0
+            stats['shocks'] = stats.get('shocks', 0) + 1
         lib.nm_agent_shot_update(a, w, C.c_float(health), F(*shooter))
         t0 = time.perf_counter()
         rc = lib.nm_agent_step(a, w, C.c_float(dt))

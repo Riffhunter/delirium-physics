@@ -91,7 +91,7 @@ class RoNDelirium : public CppUserModBase
     RoNDelirium() : CppUserModBase()
     {
         ModName = STR("RoNDelirium");
-        ModVersion = STR("1.3");
+        ModVersion = STR("1.4");
         ModDescription = STR("Delirium Physics for Ready or Not's ragdolls");
         ModAuthors = STR("Riffhunter");
 
