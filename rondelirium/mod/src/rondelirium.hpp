@@ -29,6 +29,7 @@
 #include <Unreal/UFunction.hpp>
 #include <Unreal/UFunctionStructs.hpp>
 #include <Unreal/UObject.hpp>
+#include <Unreal/UObjectArray.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 
 #include "nm.hpp"
@@ -41,6 +42,24 @@ namespace rondelirium
     using ufn::DQuat;
     using ufn::DTransform;
     using ufn::DVec;
+
+    // A weak pointer, safely on any UE4SS. An object with no serial number yet gets one through a soft reference, and until
+    // UE4SS's 1b4af88 (so on the build SWAT Unleashed requires) UE4SS copied that reference with the wrong layout on UE 5.3:
+    // it read garbage and now and then crashed. Asked by reflection, the engine gives it its number and nothing's copied.
+    inline FWeakObjectPtr weak(UObject* object)
+    {
+        FWeakObjectPtr out;
+        FUObjectItem* item = object ? FUObjectArray::IndexToObject(object->GetInternalIndex()) : nullptr;
+        if (!item) return out;
+        if (!item->GetSerialNumber())
+        {
+            static UObject* library = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+            static UFunction* soft = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Engine.KismetSystemLibrary:Conv_ObjectToSoftObjectReference"));
+            if (library && soft) ufn::Call(soft).set<UObject*>(STR("Object"), object).invoke(library);
+        }
+        if (item->GetSerialNumber()) out = object;  // (with no number, empty: as if gone, rather than UE4SS's way)
+        return out;
+    }
 
     // ---- settings (delirium.ini beside the mod's dlls folder) ----
 
@@ -545,7 +564,8 @@ namespace rondelirium
     inline std::vector<FWeakObjectPtr> shot;     // characters hit since the last tick
     inline std::vector<FWeakObjectPtr> tracked;  // every character hit this mission: watched for their ragdoll
     inline std::vector<FWeakObjectPtr> people;   // every suspect and civilian that exists: watched for the taser only
-    inline std::vector<FWeakObjectPtr> born;     // suspects and civilians just made, for people (they may be made off the game thread)
+    struct Born { UObject* object; int32 index; };
+    inline std::vector<Born> born;               // suspects and civilians just made, for people (they may be made off the game thread)
     inline std::mutex born_lock;
     inline std::vector<FWeakObjectPtr> released; // let go of: not taken again until they're shot again
 
@@ -744,15 +764,15 @@ namespace rondelirium
         if (auto c = a.character.Get())
         {
             if (!flag(c, STR("IsInRagdoll"))) game_physical_animation(c, 1.0f);
-            else if (!killed(c)) physical_animation_ramps.push_back({FWeakObjectPtr(c), 0.0});
+            else if (!killed(c)) physical_animation_ramps.push_back({weak(c), 0.0});
         }
         if (a.agent) nm::api.agent_destroy(a.agent);
         if (a.world) nm::api.world_destroy(a.world);
         a.agent = a.world = nullptr;
         if (auto c = a.character.Get())
         {
-            released.emplace_back(c);
-            if (dead(c) && !was_laid_to_rest(c)) laid_to_rest.emplace_back(c);
+            released.push_back(weak(c));
+            if (dead(c) && !was_laid_to_rest(c)) laid_to_rest.push_back(weak(c));
             log(STR("[RoNDelirium] {} released ({}, {:.1f} s)\n"), c->GetName(), why, a.time);
         }
     }
@@ -868,7 +888,7 @@ namespace rondelirium
         auto profile = (*comp)->GetValuePtrByPropertyNameInChain<FName>(STR("RagdollCollisionProfileName"));
         ufn::Call get_asset(ufn::find(mesh, STR("GetPhysicsAsset")));
         get_asset.invoke(mesh);
-        a.old_asset = FWeakObjectPtr(get_asset.get<UObject*>(STR("ReturnValue")));
+        a.old_asset = weak(get_asset.get<UObject*>(STR("ReturnValue")));
         a.old_profile = fname_call(mesh, STR("GetCollisionProfileName"));
         if (a.old_asset.Get() != *active) set_asset(mesh, *active);
         if (profile) set_profile(mesh, *profile);
@@ -933,10 +953,10 @@ namespace rondelirium
             int best = socket.starts_with(STR("Right")) ? 1 : socket.starts_with(STR("Left")) ? 0
                      : len(w.pos - hand_t[0].pos) < len(w.pos - hand_t[1].pos) ? 0 : 1;
             T hand{hand_t[best].pos, hand_t[best].rot};
-            Agent::Held h{FWeakObjectPtr(*root), hands[best], compose(inverse(hand), T{w.pos, w.rot}), w.scale};
+            Agent::Held h{weak(*root), hands[best], compose(inverse(hand), T{w.pos, w.rot}), w.scale};
             ufn::Call parent(ufn::find(*root, STR("GetAttachParent")));
             parent.invoke(*root);
-            h.parent = FWeakObjectPtr(parent.get<UObject*>(STR("ReturnValue")));
+            h.parent = weak(parent.get<UObject*>(STR("ReturnValue")));
             h.socket = fname_call(*root, STR("GetAttachSocketName"));
             auto prop = [&](const TCHAR* n) { auto v = (*root)->GetValuePtrByPropertyNameInChain<DVec>(n); return v ? *v : DVec{}; };
             h.rel_loc = prop(STR("RelativeLocation"));
@@ -955,7 +975,7 @@ namespace rondelirium
                 UObject* c = child.get<UObject*>(STR("ReturnValue"));
                 if (!c) continue;
                 auto of = [&](const TCHAR* n2) { auto v = c->GetValuePtrByPropertyNameInChain<DVec>(n2); return v ? *v : DVec{}; };
-                h.parts.push_back({FWeakObjectPtr(c), fname_call(c, STR("GetAttachSocketName")), of(STR("RelativeLocation")), of(STR("RelativeRotation")), of(STR("RelativeScale3D")), T{}});
+                h.parts.push_back({weak(c), fname_call(c, STR("GetAttachSocketName")), of(STR("RelativeLocation")), of(STR("RelativeRotation")), of(STR("RelativeScale3D")), T{}});
             }
             auto parts_off = [](Agent::Held& held) {
                 for (auto& p : held.parts)
@@ -1052,7 +1072,7 @@ namespace rondelirium
 
     inline void capsule_later(Agent& a, UObject* character)
     {
-        if (a.capsule_response <= 2) capsules_later.push_back({FWeakObjectPtr(character), a.capsule_response, now_s + 1.0});
+        if (a.capsule_response <= 2) capsules_later.push_back({weak(character), a.capsule_response, now_s + 1.0});
         a.capsule_response = 255;
     }
 
@@ -1097,8 +1117,8 @@ namespace rondelirium
         if (!cal) return nullptr;
 
         Agent a;
-        a.character = FWeakObjectPtr(character);
-        a.mesh = FWeakObjectPtr(mesh);
+        a.character = weak(character);
+        a.mesh = weak(mesh);
         a.cal = cal;
         a.alive = alive;
         a.limp = !alive && head_kill(character);
@@ -1864,7 +1884,7 @@ namespace rondelirium
             t.length = std::max(t.length, length);
             return;
         }
-        tases.push_back({FWeakObjectPtr(c), length, now_s + 0.5, how});
+        tases.push_back({weak(c), length, now_s + 0.5, how});
     }
 
     // True when this signal is finished with (taken, or not one to take).
@@ -1894,7 +1914,7 @@ namespace rondelirium
             return true;
         }
         log(STR("[RoNDelirium] {} tased ({}, {:.1f} s)\n"), c->GetName(), t.how, t.length);
-        if (std::none_of(tracked.begin(), tracked.end(), [&](const FWeakObjectPtr& x) { return x.Get() == c; })) tracked.emplace_back(c);
+        if (std::none_of(tracked.begin(), tracked.end(), [&](const FWeakObjectPtr& x) { return x.Get() == c; })) tracked.push_back(weak(c));
         if (flag(c, STR("IsInRagdoll"))) start(c, true);
         else
         {
@@ -1923,7 +1943,7 @@ namespace rondelirium
     // A character just hit: a new reaction if Delirium already drives them, their ragdoll if they're in one, else a stagger.
     inline void on_shot(UObject* c)
     {
-        if (std::none_of(tracked.begin(), tracked.end(), [&](const FWeakObjectPtr& t) { return t.Get() == c; })) tracked.emplace_back(c);
+        if (std::none_of(tracked.begin(), tracked.end(), [&](const FWeakObjectPtr& t) { return t.Get() == c; })) tracked.push_back(weak(c));
         log(STR("[RoNDelirium] hit {} in {} ({}{})\n"), c->GetName(), last_hits[c].bone, dead(c) ? STR("dead") : STR("alive"),
             v2(c) ? STR("") : STR(", not a V2 ragdoll"));
         if (!cfg.enabled || !v2(c)) return;
@@ -2041,7 +2061,12 @@ namespace rondelirium
                 next_look = now_s + 0.25;
                 {
                     std::lock_guard guard(born_lock);
-                    people.insert(people.end(), born.begin(), born.end());
+                    for (const Born& b : born)
+                    {
+                        // Still that object, and whole? (Collected since, its slot's empty or another's.)
+                        FUObjectItem* item = FUObjectArray::IndexToObject(b.index);
+                        if (item && item->GetUObject() == b.object) people.push_back(weak(b.object));
+                    }
                     born.clear();
                 }
                 std::erase_if(people, [](const FWeakObjectPtr& t) { return t.Get() == nullptr; });
@@ -2100,7 +2125,7 @@ namespace rondelirium
 
     inline void install()
     {
-        auto on_ragdoll = [](UnrealScriptFunctionCallableContext& ctx, void*) { pending.emplace_back(ctx.Context); };
+        auto on_ragdoll = [](UnrealScriptFunctionCallableContext& ctx, void*) { pending.push_back(weak(ctx.Context)); };
         auto noop = [](UnrealScriptFunctionCallableContext&, void*) {};
         int hooks = 0;
         for (auto path : {STR("/Script/ReadyOrNot.ReadyOrNotCharacter:Multicast_EnableRagdoll"), STR("/Script/ReadyOrNot.ReadyOrNotCharacter:EnableRagdoll"),
@@ -2121,7 +2146,7 @@ namespace rondelirium
                 h.weapon = weapon_of(param<UObject*>(ctx, blood, STR("HitInstigator")));
                 last_hits[ctx.Context] = h;
                 note_head_hit(ctx.Context, h.bone);
-                if (std::none_of(shot.begin(), shot.end(), [&](const FWeakObjectPtr& s) { return s.Get() == ctx.Context; })) shot.emplace_back(ctx.Context);
+                if (std::none_of(shot.begin(), shot.end(), [&](const FWeakObjectPtr& s) { return s.Get() == ctx.Context; })) shot.push_back(weak(ctx.Context));
             }, noop, nullptr);
             ++hooks;
         }
@@ -2158,7 +2183,7 @@ namespace rondelirium
                 log(STR("[RoNDelirium] point damage to {} in {} ({:.0f})\n"), c->GetName(), h.bone, param<float>(ctx, point, STR("Damage")));
                 last_hits[c] = h;
                 note_head_hit(c, h.bone);
-                shot.emplace_back(c);
+                shot.push_back(weak(c));
             }, noop, nullptr);
             ++hooks;
         }
@@ -2211,7 +2236,7 @@ namespace rondelirium
                 if (made && ((suspect_class && made->IsA(suspect_class)) || (civilian_class && made->IsA(civilian_class))) && !made->HasAnyFlags(RF_ClassDefaultObject))
                 {
                     std::lock_guard guard(born_lock);
-                    born.emplace_back(made);
+                    born.push_back({made, made->GetInternalIndex()});
                 }
             }, {false, true, STR("RoNDelirium"), STR("People")});
         }
