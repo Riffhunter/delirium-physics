@@ -68,7 +68,7 @@ def stats(r):
     if len(fr) < 5:
         out.update(jerk=0, hops=0, foot_lifts=0, gap=0, max_gap=0, max_head=0, max_head_nm=0, flags=['short'])
         return out
-    dt = 1 / 30
+    dt = (fr[-1]['t'] - fr[0]['t']) / max(len(fr) - 1, 1) or 1 / 30  # the recording's own rate (record_fps: 30 by default, 60 or every frame)
     jerk = 0.0; n = 0
     for k in (HEAD, PELVIS):
         x = [f['body'][k][:3] for f in fr]
