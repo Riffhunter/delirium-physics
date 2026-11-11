@@ -104,6 +104,8 @@ namespace rondelirium
         float grab_time = 1.2f;     // seconds a hand holds the wound (GTA IV's 3)
         float settle_after = 1.6f;  // a stagger still on its feet and settled this long after the hit goes back to the animation
         bool walls = true;         // the walls around found by traces for Delirium (the level's big meshes have no box of their own)
+        bool corpses = true;       // the bodies lying near as boxes for Delirium (one falling on another lay on it, not through it)
+        float rebuild_world = 1.0f;  // metres the body goes from where Delirium's world was made before it's made again there (0 = never)
         bool log = true;
         bool record = true;        // each activation written to recordings/ (tools/recstats.py, replay.py, recviewer.html)
         int record_keep = 300;     // the newest this many kept (marked ones always)
@@ -128,6 +130,9 @@ namespace rondelirium
         bool death_hit = true;
         bool keep_momentum = true;    // a stagger begins at the character's own speed (walking, running), not stopped dead
         bool pose_bridge = true;      // back to the animation through the pose they had when hit, driven, not into the T-pose
+        float handover = 0.25f;       // seconds the bridge's last pose, held still, is blended into the live animation (0 = at once)
+        bool handover_hand = false;   // the animation's left hand on the gun (its IK) eased in with the hand-over, not at once
+        int dead_capsule = 2;         // a dead one's capsule: 0 left where they died, 1 brought to the body, 2 that and no collision
         float record_fps = 30.0f;     // poses recorded a second (0: every frame, to see a shimmer faster than 30 a second)
         float record_tail = 3.0f;     // seconds the game's bodies are still recorded after Delirium lets go (a .tail beside the .rec; 0 = none)
     };
@@ -161,12 +166,17 @@ namespace rondelirium
             else if (key == "stagger") cfg.stagger = v != 0;
             else if (key == "stagger_time") cfg.stagger_time = v;
             else if (key == "blend_out") cfg.blend_out = std::max(v, 0.05f);
+            else if (key == "handover") cfg.handover = std::clamp(v, 0.0f, 1.0f);
+            else if (key == "handover_hand") cfg.handover_hand = v != 0;
+            else if (key == "dead_capsule") cfg.dead_capsule = std::clamp(int(v), 0, 2);
             else if (key == "stagger_health") cfg.stagger_health = v;
             else if (key == "weak_health") cfg.weak_health = v;
             else if (key == "follow") cfg.follow = std::clamp(v, 0.0f, 1.0f);
             else if (key == "leg_injury") cfg.leg_injury = std::clamp(v, 0.0f, 0.95f);
             else if (key == "arm_injury") cfg.arm_injury = std::clamp(v, 0.0f, 0.95f);
             else if (key == "walls") cfg.walls = v != 0;
+            else if (key == "corpses") cfg.corpses = v != 0;
+            else if (key == "rebuild_world") cfg.rebuild_world = std::max(v, 0.0f);
             else if (key == "fire_back") cfg.fire_back = std::clamp(v, 0.0f, 1.0f);
             else if (key == "fire_burst") cfg.fire_burst = std::max(v, 0.0f);
             else if (key == "react_below") cfg.react_below = std::clamp(v, 0.0f, 1.01f);
@@ -433,6 +443,14 @@ namespace rondelirium
 
     // ---- agents ----
 
+    // One pellet of a shotgun blast: where it landed and which way it went (Delirium space).
+    struct Pellet
+    {
+        StringType bone;
+        DVec at{};
+        DVec dir{};
+    };
+
     // A bullet's hit, from Multicast_SpawnBloodEffects' HitResult (Delirium space).
     struct Hit
     {
@@ -442,6 +460,7 @@ namespace rondelirium
         DVec from{};                    // where the bullet came from: the shooter's eyes (looked at)
         const char* weapon = nullptr;   // the kind of gun (pistol, smg, rifle, battle rifle, shotgun): the bullet's push
         int count = 1;                  // bullets that landed together, in the same frame (a shotgun's pellets): their pushes add up
+        std::vector<Pellet> pellets;    // those bullets, each pushing the part it hit (the ones in this hit's part go with the shot)
     };
 
     // The kind of the shooter's gun: Ready or Not's weapon subclass (as RoNGore reads it).
@@ -561,6 +580,8 @@ namespace rondelirium
         double last_pelvis_t = -1;
         bool dragged_told = false;
         bool death_hit = false;     // taken at the killing bullet, before the game's death ragdoll (death_hit)
+        bool handing_over = false;  // ended into a handover (the bodies held still, blended into the animation)
+        bool corpse_capsule = false;  // dead: its capsule handed to corpse_capsules (brought to the body)
         uint32 anim = 0xFFFFFFFEu;  // the animation blueprint's ragdoll flags last frame (anim_flags)
         std::array<T, nm::PARTS> start_rel{};  // each body as the animation had it when the stagger began, on the actor (pose_bridge)
         bool has_start = false;
@@ -572,6 +593,9 @@ namespace rondelirium
         double next_frame = 0;
         uint32_t seed = 0;  // its random numbers' seed in Delirium (recorded: a replay sets it again)
         double clock = 0;  // seconds since Delirium took them, all hits together (the recording's time)
+        DVec world_at{};   // where Delirium's world (ground, furniture, walls) was made around the body
+        double world_t = 0;
+        int worlds = 0;    // made again since
         bool marked = false;
     };
 
@@ -595,6 +619,7 @@ namespace rondelirium
     inline std::vector<FWeakObjectPtr> shot;     // characters hit since the last tick
     inline std::vector<FWeakObjectPtr> tracked;  // every character hit this mission: watched for their ragdoll
     inline std::vector<FWeakObjectPtr> people;   // every suspect and civilian that exists: watched for the taser only
+    inline std::vector<FWeakObjectPtr> censused; // the dead whose capsule went in the log (capsule_census)
     struct Born { UObject* object; int32 index; };
     inline std::vector<Born> born;               // suspects and civilians just made, for people (they may be made off the game thread)
     inline std::mutex born_lock;
@@ -824,6 +849,42 @@ namespace rondelirium
         return bits;
     }
 
+    // The animation blueprint's left hand on the gun (RoNAnimInstance: LeftHandIKAlpha, its item-based one, the grip):
+    // going back to the animation the left hand jumped 0.2-0.5 m in the first frame while the rest of the body blended.
+    inline const wchar_t* HAND_IK[] = {L"LeftHandIKAlpha", L"LeftHandIKAlpha_ItemBased", L"LeftHandGripAlpha"};
+
+    inline UObject* anim_instance(UObject* mesh)
+    {
+        if (!mesh) return nullptr;
+        ufn::Call get(ufn::find(mesh, STR("GetAnimInstance")));
+        if (!get) return nullptr;
+        get.invoke(mesh);
+        return get.get<UObject*>(STR("ReturnValue"));
+    }
+
+    // The three as float slots on the animation instance (null where it has none, or not as a float).
+    inline std::array<float*, 3> hand_ik(UObject* anim)
+    {
+        std::array<float*, 3> out{};
+        if (!anim) return out;
+        static std::map<UClass*, std::array<FFloatProperty*, 3>> props;
+        UClass* cls = anim->GetClassPrivate();
+        auto it = props.find(cls);
+        if (it == props.end())
+        {
+            std::array<FFloatProperty*, 3> found{};
+            for (FProperty* p : cls->ForEachPropertyInChain())
+                for (size_t i = 0; i < 3; ++i)
+                    if (p->GetName() == HAND_IK[i]) found[i] = CastField<FFloatProperty>(p);
+            it = props.emplace(cls, found).first;
+            log(STR("[RoNDelirium] {}: left hand IK {}{}{}\n"), cls->GetName(), found[0] ? STR("alpha ") : STR(""), found[1] ? STR("item-alpha ") : STR(""),
+                found[2] ? STR("grip") : STR("") );
+        }
+        for (size_t i = 0; i < 3; ++i)
+            if (it->second[i]) out[i] = it->second[i]->ContainerPtrToValuePtr<float>(anim);
+        return out;
+    }
+
     inline std::string anim_text(uint32 bits)
     {
         if (bits == ANIM_UNKNOWN) return "unknown";
@@ -838,7 +899,8 @@ namespace rondelirium
     // After Delirium lets go: the game's bodies still recorded a few seconds (record_tail), in a .tail beside the .rec, to
     // see what the game's ragdoll, its get-up and its death do with the body (twitches, a T-pose) once it's no longer ours.
     // Lines: tail 1 <why> <alive|dead>, then frame t inragdoll simulating dead <21 x 7 the bodies, as the .rec's>.
-    struct Tail { FWeakObjectPtr character, mesh; Calib* cal; std::string buf; double t, until, next; std::filesystem::path file; uint32 anim = 0xFFFFFFFEu; };
+    struct Tail { FWeakObjectPtr character, mesh; Calib* cal; std::string buf; double t, until, next; std::filesystem::path file; uint32 anim = 0xFFFFFFFEu;
+                  std::array<float, 3> ik{-1, -1, -1}; };
     inline std::vector<Tail> tails;
 
     inline bool simulating(UObject* mesh, const wchar_t* bone)
@@ -863,6 +925,15 @@ namespace rondelirium
                 {
                     t.anim = f;
                     std::format_to(std::back_inserter(t.buf), "anim {:.4f} {}\n", t.t, anim_text(f));
+                }
+                // (the left hand's IK as the animation has it: a line when it changes)
+                auto ik = hand_ik(anim_instance(mesh));
+                std::array<float, 3> v{};
+                for (size_t i = 0; i < 3; ++i) v[i] = ik[i] ? *ik[i] : -1.0f;
+                if (std::abs(v[0] - t.ik[0]) > 0.02f || std::abs(v[1] - t.ik[1]) > 0.02f || std::abs(v[2] - t.ik[2]) > 0.02f)
+                {
+                    t.ik = v;
+                    std::format_to(std::back_inserter(t.buf), "ik {:.4f} {:.3f} {:.3f} {:.3f}\n", t.t, v[0], v[1], v[2]);
                 }
             }
             if (!done && t.t >= t.next)
@@ -902,7 +973,7 @@ namespace rondelirium
         if (auto c = a.character.Get())
         {
             // (Not on a dead one whose bodies are still ours, the game's ragdoll not come yet: it pulled them into its death animation.)
-            if (!flag(c, STR("IsInRagdoll"))) { if (!(a.death_hit && dead(c))) game_physical_animation(c, 1.0f); }
+            if (!flag(c, STR("IsInRagdoll"))) { if (!(a.death_hit && dead(c)) && !a.handing_over) game_physical_animation(c, 1.0f); }
             else if (!killed(c)) physical_animation_ramps.push_back({weak(c), 0.0});
         }
         if (a.agent) nm::api.agent_destroy(a.agent);
@@ -1338,6 +1409,249 @@ namespace rondelirium
         a.own = false;
     }
 
+    // The hand-over to the animation at the bridge's end. Turning the physics off let the animation in at once, a jump of
+    // 0.1-0.6 m (head, hands) in one frame. Now the bodies stop simulating but stay where they are (KinematicBonesUpdateType
+    // SkipAllBones: the animation doesn't move them) and the mesh blends them in with bBlendPhysics on, their weight going
+    // from 1 to 0 over handover seconds. (1.5-test4 did this without bBlendPhysics, and the bodies' weight did nothing
+    // once they no longer simulated: the animation came in at once.) The physics asset and collision come back at the end.
+    struct Handover
+    {
+        FWeakObjectPtr character, mesh, asset;
+        FName profile;
+        uint8 kinematic = 0;
+        double left = 0, total = 0;
+        std::array<float, 3> ik_game{-1, -1, -1};     // the animation's own left-hand IK values (what it writes each frame)
+        std::array<float, 3> ik_written{-9, -9, -9};  // what we wrote over them last frame
+    };
+    inline std::vector<Handover> handovers;
+
+    // The animation's left-hand IK scaled by how far the hand-over is (0 at its start, the animation's own at its end).
+    // The animation writes its values each frame: one that differs from what we wrote is its own, taken as the new one.
+    inline void handover_hand_ik(Handover& h, UObject* mesh, double done)
+    {
+        if (!cfg.handover_hand) return;
+        auto ik = hand_ik(anim_instance(mesh));
+        for (size_t i = 0; i < 3; ++i)
+        {
+            if (!ik[i]) continue;
+            if (std::abs(*ik[i] - h.ik_written[i]) > 1e-4f) h.ik_game[i] = *ik[i];
+            if (h.ik_game[i] < 0) continue;
+            h.ik_written[i] = done >= 1.0 ? h.ik_game[i] : float(h.ik_game[i] * std::clamp(done, 0.0, 1.0));
+            *ik[i] = h.ik_written[i];
+        }
+    }
+
+    inline FBoolProperty* blend_physics_prop(UObject* mesh)
+    {
+        static std::map<UClass*, FBoolProperty*> found;
+        UClass* cls = mesh->GetClassPrivate();
+        if (auto it = found.find(cls); it != found.end()) return it->second;
+        FBoolProperty* prop = nullptr;
+        for (FProperty* p : cls->ForEachPropertyInChain())
+            if (p->GetName() == STR("bBlendPhysics")) prop = CastField<FBoolProperty>(p);
+        return found[cls] = prop;
+    }
+
+    inline uint8* kinematic_bones(UObject* mesh)
+    {
+        return mesh ? mesh->GetValuePtrByPropertyNameInChain<uint8>(STR("KinematicBonesUpdateType")) : nullptr;
+    }
+
+    inline bool handover_begin(Agent& a, UObject* character, UObject* mesh)
+    {
+        FBoolProperty* bp = blend_physics_prop(mesh);
+        uint8* kin = kinematic_bones(mesh);
+        if (!bp || !kin) return false;
+        Handover h{a.character, a.mesh, a.old_asset, a.old_profile, *kin, cfg.handover, cfg.handover};
+        release_held(a);
+        capsule_restore(a, character);
+        *kin = 1;  // EKinematicBonesUpdateToPhysics::SkipAllBones
+        bp->SetPropertyValueInContainer(mesh, true);
+        blend(mesh, 1.0f);
+        simulate(mesh, false);
+        a.own = false;
+        a.handing_over = true;
+        handover_hand_ik(h, mesh, 0.0);
+        handovers.push_back(h);
+        note(a, "handover");
+        return true;
+    }
+
+    inline void handover_finish(Handover& h)
+    {
+        UObject* mesh = h.mesh.Get();
+        UObject* c = h.character.Get();
+        if (!mesh) return;
+        blend(mesh, 0.0f);
+        handover_hand_ik(h, mesh, 1.0);
+        if (FBoolProperty* bp = blend_physics_prop(mesh)) bp->SetPropertyValueInContainer(mesh, false);
+        if (uint8* kin = kinematic_bones(mesh)) *kin = h.kinematic;
+        if (auto old = h.asset.Get()) set_asset(mesh, old);
+        set_profile(mesh, h.profile);
+        if (c && !dead(c) && !flag(c, STR("IsInRagdoll"))) game_physical_animation(c, 1.0f);
+    }
+
+    // A character handed over and shot (or ragdolled) again: the hand-over done at once, before anything else takes the mesh.
+    inline void handover_cut(UObject* character)
+    {
+        std::erase_if(handovers, [&](Handover& h) {
+            if (h.character.Get() != character) return false;
+            handover_finish(h);
+            return true;
+        });
+    }
+
+    inline void handover_tick(double dt)
+    {
+        std::erase_if(handovers, [dt](Handover& h) {
+            UObject* mesh = h.mesh.Get();
+            UObject* c = h.character.Get();
+            if (!mesh || !c) return true;
+            h.left -= dt;
+            if (h.left <= 0 || dead(c) || flag(c, STR("IsInRagdoll")))
+            {
+                handover_finish(h);
+                return true;
+            }
+            double x = std::clamp(h.left / h.total, 0.0, 1.0);
+            double w = x * x * (3 - 2 * x);
+            blend(mesh, float(w));
+            handover_hand_ik(h, mesh, 1.0 - w);
+            return false;
+        });
+    }
+
+    inline bool has_authority(UObject* character)
+    {
+        UFunction* auth = ufn::find(character, STR("HasAuthority"));
+        if (!auth) return true;
+        ufn::Call c(auth);
+        c.invoke(character);
+        return c.get<bool>(STR("ReturnValue"));
+    }
+
+    inline DVec actor_location(UObject* character)
+    {
+        ufn::Call get(ufn::find(character, STR("K2_GetActorLocation")));
+        get.invoke(character);
+        return get.get<DVec>(STR("ReturnValue"));
+    }
+
+    // A dead one's capsule. Staggering, it went under Delirium's pelvis (capsule_follow); killed, it stayed where they died
+    // while the body fell on, 0.8 m off in the median and up to 4 m (39 deaths mid-stagger): a capsule standing over an
+    // empty spot, which raised the player's gun walking past it (Nexus reports). Brought to the body's pelvis while the
+    // game's ragdoll simulates, at its height (moving the actor while the bodies are kinematic, frozen by the game, would
+    // carry the corpse along: never then). dead_capsule 2 also turns the capsule's collision off.
+    struct CorpseCapsule
+    {
+        FWeakObjectPtr character, mesh;
+        double since = 0, idle = 0, settled = 0, moved = 0, first_off = -1;
+    };
+    inline std::vector<CorpseCapsule> corpse_capsules;
+
+    inline void corpse_capsule_add(UObject* character, UObject* mesh)
+    {
+        if (!cfg.dead_capsule || !character || !mesh) return;
+        if (std::any_of(corpse_capsules.begin(), corpse_capsules.end(), [&](const CorpseCapsule& k) { return k.character.Get() == character; })) return;
+        corpse_capsules.push_back({weak(character), weak(mesh), now_s});
+        if (cfg.dead_capsule >= 2)
+            if (UObject* capsule = capsule_of(character))
+                ufn::Call(ufn::find(capsule, STR("SetCollisionEnabled"))).set<uint8>(STR("NewType"), 0).invoke(capsule);  // NoCollision
+    }
+
+    inline void corpse_capsule_tick(double dt)
+    {
+        std::erase_if(corpse_capsules, [dt](CorpseCapsule& k) {
+            UObject* c = k.character.Get();
+            UObject* mesh = k.mesh.Get();
+            if (!c || !mesh || !dead(c)) return true;
+            auto done = [&](const CharType* why) {
+                log(STR("[RoNDelirium] {} capsule brought to the body ({}): {:.2f} m off at first, moved {:.2f} m in {:.1f} s\n"), c->GetName(), why,
+                    std::max(k.first_off, 0.0), k.moved, now_s - k.since);
+                return true;
+            };
+            if (!has_authority(c)) return true;  // online, the actor's place is the server's
+            DVec at = actor_location(c);
+            DVec pelvis = bone_world(mesh, L"pelvis").pos;
+            DVec to{pelvis.x, pelvis.y, at.z};
+            double off = len(to - at) / 100.0;
+            if (k.first_off < 0) k.first_off = off;
+            if (!simulating(mesh, L"pelvis"))
+            {
+                k.idle += dt;
+                return k.idle > 1.0 ? done(STR("the body no longer simulates")) : false;
+            }
+            k.idle = 0;
+            if (now_s - k.since > 20.0) return done(STR("20 s"));
+            if (off < 0.03)
+            {
+                k.settled += dt;
+                return k.settled > 2.0 ? done(STR("settled")) : false;
+            }
+            k.settled = 0;
+            const double most = 8.0 * std::max(dt, 1.0 / 240.0);  // m this frame
+            if (off > most) to = at + (to - at) * (most / off);
+            ufn::Call(ufn::find(c, STR("K2_SetActorLocation"))).set(STR("NewLocation"), to).set<bool>(STR("bSweep"), false)
+                .set<bool>(STR("bTeleport"), false).invoke(c);
+            k.moved += std::min(off, most);
+            return false;
+        });
+    }
+
+    // Diagnosis (log = 1): every dead one's capsule a second and four seconds after they died, whoever took the body (the
+    // mod off with F8 too: how the game leaves a capsule on its own). Collision enabled (0 none, 1 query, 2 physics, 3 both),
+    // profile, responses to channels 0-17 (I ignore, O overlap, B block), how far from the body's pelvis.
+    inline bool v2(UObject* character);
+    struct DeathSeen { FWeakObjectPtr character; double t; int stage; bool mod; };
+    inline std::vector<DeathSeen> deaths_seen;
+
+    inline void capsule_census(UObject* c, const DeathSeen& d, const CharType* when)
+    {
+        UObject* capsule = capsule_of(c);
+        auto slot = c->GetValuePtrByPropertyNameInChain<UObject*>(STR("Mesh"));
+        if (!capsule || !slot || !*slot) return;
+        ufn::Call en(ufn::find(capsule, STR("GetCollisionEnabled")));
+        en.invoke(capsule);
+        StringType resp;
+        for (uint8 ch = 0; ch < 18; ++ch)
+        {
+            ufn::Call r(ufn::find(capsule, STR("GetCollisionResponseToChannel")));
+            r.set<uint8>(STR("Channel"), ch).invoke(capsule);
+            uint8 v = r.get<uint8>(STR("ReturnValue"));
+            resp += v == 0 ? STR('I') : v == 1 ? STR('O') : v == 2 ? STR('B') : STR('?');
+        }
+        DVec at = actor_location(c);
+        DVec pelvis = bone_world(*slot, L"pelvis").pos;
+        log(STR("[RoNDelirium] capsule of the dead {} at {}: collision {}, profile {}, channels {}, {:.2f} m from the body's pelvis "
+                "(up {:.2f}), body {}, {}\n"),
+            c->GetName(), when, en.get<uint8>(STR("ReturnValue")), fname_call(capsule, STR("GetCollisionProfileName")).ToString(), resp,
+            std::hypot(at.x - pelvis.x, at.y - pelvis.y) / 100.0, (at.z - pelvis.z) / 100.0,
+            simulating(*slot, L"pelvis") ? STR("simulating") : STR("not simulating"), d.mod ? STR("Delirium took it") : STR("the game's alone (mod off)"));
+    }
+
+    inline void census_tick()
+    {
+        if (!cfg.log) return;
+        std::erase_if(deaths_seen, [](const DeathSeen& d) { return d.character.Get() == nullptr || d.stage >= 2; });
+        for (auto& t : tracked)
+        {
+            UObject* c = t.Get();
+            if (!c || !dead(c)) continue;
+            auto it = std::find_if(deaths_seen.begin(), deaths_seen.end(), [&](const DeathSeen& d) { return d.character.Get() == c; });
+            if (it == deaths_seen.end())
+            {
+                if (std::any_of(censused.begin(), censused.end(), [&](const FWeakObjectPtr& x) { return x.Get() == c; })) continue;
+                censused.push_back(weak(c));
+                deaths_seen.push_back({weak(c), now_s, 0, cfg.enabled && v2(c)});
+                continue;
+            }
+            double age = now_s - it->t;
+            if (it->stage == 0 && age > 1.0) capsule_census(c, *it, STR("1 s")), it->stage = 1;
+            else if (it->stage == 1 && age > 4.0) capsule_census(c, *it, STR("4 s")), it->stage = 2;
+        }
+        std::erase_if(censused, [](const FWeakObjectPtr& x) { return x.Get() == nullptr; });
+    }
+
     // The character's capsule kept under the staggering pelvis, so the animation picks up where the body ended.
     // Delirium's pelvis, not the mesh's pelvis bone: the bone is the physics blended with the animation, and the animation
     // goes where the actor goes, so following the bone fed back. Blending back into the animation it ran off in the last
@@ -1394,6 +1708,7 @@ namespace rondelirium
     inline Agent* start(UObject* character, bool alive = false)
     {
         if (!cfg.enabled || !character || driving(character)) return nullptr;
+        handover_cut(character);
         auto mesh_slot = character->GetValuePtrByPropertyNameInChain<UObject*>(STR("Mesh"));
         if (!mesh_slot || !*mesh_slot) return nullptr;
         UObject* mesh = *mesh_slot;
@@ -1430,16 +1745,21 @@ namespace rondelirium
         return &agents.back();
     }
 
-    // The floor under a point (Delirium space): a line trace down through the level, the character itself ignored.
+    // The floor under a point (Delirium space): a line trace down through the level (WorldStatic and WorldDynamic only),
+    // the character itself ignored. Not people: by the visibility channel, the traces of the ground grid hit the
+    // characters standing or falling around (and a dead one's own gear) at 1.2-1.8 m, and Delirium, its legs inside
+    // that "floor", flew up and lost the body.
     inline double floor_below(UObject* character, DVec from, double fallback)
     {
         static UObject* lib = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
-        static UFunction* trace = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Engine.KismetSystemLibrary:LineTraceSingle"));
+        static UFunction* trace = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Engine.KismetSystemLibrary:LineTraceSingleForObjects"));
         if (!lib || !trace) return fallback;
+        struct RawArray { void* data; int32 num; int32 max; };
+        static uint8 types[2] = {0, 1};  // ObjectTypeQuery1, 2: WorldStatic, WorldDynamic
         ufn::Call c(trace);
         c.set(STR("WorldContextObject"), character).set(STR("Start"), to_ue_point(from)).set(STR("End"), to_ue_point(from - DVec{0, 0, 3.0}))
-            .set<uint8>(STR("TraceChannel"), 0).set<bool>(STR("bTraceComplex"), false).set<uint8>(STR("DrawDebugType"), 0).set<bool>(STR("bIgnoreSelf"), true)
-            .invoke(lib);
+            .set(STR("ObjectTypes"), RawArray{types, 2, 2}).set<bool>(STR("bTraceComplex"), false).set<uint8>(STR("DrawDebugType"), 0)
+            .set<bool>(STR("bIgnoreSelf"), true).invoke(lib);
         if (!c.get<bool>(STR("ReturnValue"))) return fallback;
         return to_nm_point(c.field<DVec>(STR("OutHit"), STR("ImpactPoint"))).z;
     }
@@ -1513,10 +1833,12 @@ namespace rondelirium
     inline std::vector<float> wall_slabs(UObject* character, DVec pelvis, double floor, const std::array<T, nm::PARTS>& parts)
     {
         static UObject* lib = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
-        static UFunction* trace = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Engine.KismetSystemLibrary:LineTraceSingle"));
+        static UFunction* trace = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Engine.KismetSystemLibrary:LineTraceSingleForObjects"));
         std::vector<float> out;
         if (!lib || !trace) return out;
         struct RawArray { UObject** data; int32 num; int32 max; };
+        struct TypeArray { void* data; int32 num; int32 max; };
+        static uint8 types[2] = {0, 1};  // the level only (WorldStatic, WorldDynamic): a person beside them isn't a wall
         // The character's own things (its weapon) aren't walls.
         ufn::Call attached(ufn::find(character, STR("GetAttachedActors")));
         attached.set<bool>(STR("bResetArray"), true).set<bool>(STR("bRecursivelyIncludeAttachedActors"), true).invoke(character);
@@ -1533,7 +1855,7 @@ namespace rondelirium
                 DVec to = from + DVec{std::cos(yaw), std::sin(yaw), 0} * REACH;
                 ufn::Call c(trace);
                 c.set(STR("WorldContextObject"), character).set(STR("Start"), to_ue_point(from)).set(STR("End"), to_ue_point(to))
-                    .set<uint8>(STR("TraceChannel"), 0).set<bool>(STR("bTraceComplex"), false)
+                    .set(STR("ObjectTypes"), TypeArray{types, 2, 2}).set<bool>(STR("bTraceComplex"), false)
                     .set(STR("ActorsToIgnore"), RawArray{ignore.data(), int32(ignore.size()), int32(ignore.size())})
                     .set<uint8>(STR("DrawDebugType"), 0).set<bool>(STR("bIgnoreSelf"), true).invoke(lib);
                 if (!c.get<bool>(STR("ReturnValue"))) continue;
@@ -1558,6 +1880,82 @@ namespace rondelirium
                 out.insert(out.end(), {float(slab.p.x), float(slab.p.y), float(slab.p.z), float(slab.q.x), float(slab.q.y), float(slab.q.z),
                                        float(slab.q.w), float(HALF_DEPTH), float(HALF_SIDE), float(HALF_SIDE), 0, 0, 0});
             }
+        }
+        return out;
+    }
+
+    // The dead lying near (still, nobody driving them) as boxes for Delirium, one per trunk, head and limb bone: a body
+    // falling on another lay on it in the game while Delirium, not knowing it, lay on the floor below and the body hung
+    // half a metre over it the whole time (a tased one on a corpse, 10 s). The floor's traces no longer hit people, so a
+    // corpse isn't floor either. Boxes a part of this body already touches are left out (shoved out at the first step).
+    inline std::vector<float> corpse_boxes(UObject* character, DVec pelvis, const std::array<T, nm::PARTS>& parts, int* bodies)
+    {
+        std::vector<float> out;
+        *bodies = 0;
+        std::vector<std::pair<double, UObject*>> close_by;
+        std::vector<UObject*> seen;
+        // (log = 1: each one within 4 m and why it was or wasn't taken; in 1.5-test8 none ever was, even a corpse 1.7 m off)
+        auto consider = [&](UObject* c) {
+            if (!c || c == character || std::find(seen.begin(), seen.end(), c) != seen.end()) return;
+            seen.push_back(c);
+            auto slot = c->GetValuePtrByPropertyNameInChain<UObject*>(STR("Mesh"));
+            if (!slot || !*slot) return;
+            UObject* mesh = *slot;
+            DVec at = to_nm_point(bone_world(mesh, L"pelvis").pos);
+            double d = len(at - pelvis);
+            if (d > 4.0) return;
+            double v = len(to_nm_point(body_vec(mesh, STR("GetPhysicsLinearVelocity"), L"pelvis")));
+            const CharType* why = !dead(c) ? STR("alive") : driving(c) ? STR("Delirium drives it") : d > 2.5 ? STR("over 2.5 m")
+                                : v > 0.6 ? STR("still moving") : nullptr;
+            log(STR("[RoNDelirium]   {} {:.2f} m off (pelvis {:.2f} m up, {:.2f} m/s, {}): {}\n"), c->GetName(), d, at.z - pelvis.z, v,
+                simulating(mesh, L"pelvis") ? STR("simulating") : STR("not simulating"), why ? why : STR("a corpse to lie on"));
+            if (!why) close_by.push_back({d, c});
+        };
+        for (auto& t : people) consider(t.Get());
+        for (auto& t : tracked) consider(t.Get());
+        log(STR("[RoNDelirium]   looked for the dead near among {} people and {} hit\n"), people.size(), tracked.size());
+        std::sort(close_by.begin(), close_by.end());
+        if (close_by.size() > 3) close_by.resize(3);
+        struct Seg { const wchar_t* from; const wchar_t* to; double r; };
+        static const Seg SEGS[] = {{L"pelvis", L"spine_3", 0.14}, {L"thigh_LE", L"calf_LE", 0.08}, {L"calf_LE", L"foot_LE", 0.06},
+                                   {L"thigh_RI", L"calf_RI", 0.08}, {L"calf_RI", L"foot_RI", 0.06}, {L"upperarm_LE", L"lowerarm_LE", 0.055},
+                                   {L"lowerarm_LE", L"hand_LE", 0.045}, {L"upperarm_RI", L"lowerarm_RI", 0.055}, {L"lowerarm_RI", L"hand_RI", 0.045},
+                                   {L"neck_1", L"head", 0.11}};
+        for (auto& [d, c] : close_by)
+        {
+            UObject* mesh = *c->GetValuePtrByPropertyNameInChain<UObject*>(STR("Mesh"));
+            bool any = false;
+            for (const Seg& sg : SEGS)
+            {
+                DVec a = to_nm_point(bone_world(mesh, sg.from).pos), b = to_nm_point(bone_world(mesh, sg.to).pos);
+                if (&sg == &SEGS[9]) b = b + (b - a) * (0.09 / std::max(len(b - a), 1e-3));  // the skull, above the head bone
+                DVec u = b - a;
+                double l = len(u);
+                if (l < 1e-3 || l > 1.2) continue;
+                u = u * (1.0 / l);
+                // The box's x along the bone: the turn from x to u.
+                DVec x{1, 0, 0};
+                DVec ax = cross(x, u);
+                double w = 1.0 + u.x;
+                DQuat q = w < 1e-6 ? DQuat{0, 0, 1, 0} : DQuat{ax.x, ax.y, ax.z, w};
+                double qn = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+                q = {q.x / qn, q.y / qn, q.z / qn, q.w / qn};
+                DVec mid = (a + b) * 0.5;
+                DVec half{l / 2 + sg.r * 0.5, sg.r, sg.r};
+                bool touching = std::any_of(parts.begin(), parts.end(), [&](const T& part) {
+                    DVec rel = rotate(conj(q), part.p - mid);
+                    return std::abs(rel.x) < half.x + 0.05 && std::abs(rel.y) < half.y + 0.05 && std::abs(rel.z) < half.z + 0.05;
+                });
+                if (touching)
+                {
+                    log(STR("[RoNDelirium]   {}: {}-{} left out (this body touches it)\n"), c->GetName(), sg.from, sg.to);
+                    continue;
+                }
+                out.insert(out.end(), {float(mid.x), float(mid.y), float(mid.z), float(q.x), float(q.y), float(q.z), float(q.w),
+                                       float(half.x), float(half.y), float(half.z), 0, 0, 0});
+                any = true;
+            }
+            *bodies += any;
         }
         return out;
     }
@@ -1661,6 +2059,7 @@ namespace rondelirium
         UObject* character = a.character.Get();
         UObject* mesh = a.mesh.Get();
         if (!character || !mesh) return end(a, STR("gone")), false;
+        if (!a.corpse_capsule && dead(character)) a.corpse_capsule = true, corpse_capsule_add(character, mesh);
         // The game's ragdoll may take a frame or two to start after EnableRagdoll.
         // (Taken at the killing bullet: the game's death ragdoll comes up to 0.6 s after it; never, and the body's ours till the end.)
         if (!a.own && !a.death_hit && a.time > 0.3 && !flag(character, STR("IsInRagdoll"))) return end(a, STR("ragdoll off")), false;
@@ -1773,7 +2172,7 @@ namespace rondelirium
             a.blend_left -= dt;
             if (a.blend_left <= 0)
             {
-                own_physics_off(a, character, mesh);
+                if (!(a.bridging && cfg.handover > 0 && handover_begin(a, character, mesh))) own_physics_off(a, character, mesh);
                 recovered_at[character] = now_s + cfg.recover_time * a.left;
                 return end(a, STR("back to the animation")), false;
             }
@@ -1848,6 +2247,44 @@ namespace rondelirium
             return T{{p[0], p[1], p[2]}, {q[0], q[1], q[2], q[3]}};
         };
 
+        // Delirium's world around the body where it is now: the ground as it is (steps, kerbs, slopes) under it, a flat floor
+        // below its lowest point as a backstop, walls and furniture (and the dead lying near) as boxes, so Delirium steps and
+        // reaches around them instead of pulling the body through. Made at the start and again each time the body has gone
+        // rebuild_world metres from where it was made: the ground grid is 3 m square, and a body carried further fell
+        // against walls and furniture Delirium had never been told of (bodies that went 1.4 m or more drifted off it
+        // nearly five times as often).
+        auto make_world = [&](double floor) {
+            void* w = nm::api.world_create();
+            if (a.tape) *a.tape += "world\n", nm::tape::on[w] = a.tape.get();
+            double lowest = ground_mesh(w, character, part[0].p, floor);
+            nm::api.world_add_floor(w, float(part[0].p.x), float(part[0].p.y), float(lowest - 0.02), 50.0f);
+            auto boxes = level_boxes(character, part[0].p, floor, part);
+            size_t furniture = boxes.size() / 13;
+            size_t slabs_n = 0;
+            if (cfg.walls)
+            {
+                auto slabs = wall_slabs(character, part[0].p, floor, part);
+                slabs_n = slabs.size() / 13;
+                boxes.insert(boxes.end(), slabs.begin(), slabs.end());
+            }
+            int lying = 0;
+            if (cfg.corpses)
+            {
+                auto dead_near = corpse_boxes(character, part[0].p, part, &lying);
+                boxes.insert(boxes.end(), dead_near.begin(), dead_near.end());
+            }
+            if (!boxes.empty()) nm::api.world_set_boxes(w, boxes.data(), int32_t(boxes.size() / 13));
+            if (a.world)
+            {
+                nm::tape::on.erase(a.world);
+                nm::api.world_destroy(a.world);
+            }
+            a.world = w;
+            a.world_at = part[0].p;
+            a.world_t = a.clock;
+            log(STR("[RoNDelirium]   {}{} furniture boxes, {} wall slabs around, {} boxes of {} bodies lying near\n"),
+                a.worlds ? STR("world made again here: ") : STR(""), furniture, slabs_n, boxes.size() / 13 - furniture - slabs_n, lying);
+        };
         if (!a.started)
         {
             if (!sync()) return end(a, STR("error")), false;
@@ -1864,23 +2301,9 @@ namespace rondelirium
             double floor = floor_below(character, part[0].p, feet);
             a.floor = floor;
             a.head_start = part[12].p.z - floor;
-            a.world = nm::api.world_create();
-            if (a.tape) *a.tape += "world\n", nm::tape::on[a.world] = a.tape.get();
-            // The ground as it is (steps, kerbs, slopes) under the body; a flat floor below its lowest point as a backstop.
-            double lowest = ground_mesh(a.world, character, part[0].p, floor);
-            nm::api.world_add_floor(a.world, float(part[0].p.x), float(part[0].p.y), float(lowest - 0.02), 50.0f);
-            // Walls and furniture as boxes, so Delirium steps and reaches around them instead of pulling the body through.
-            auto boxes = level_boxes(character, part[0].p, floor, part);
-            size_t furniture = boxes.size() / 13;
-            if (cfg.walls)
-            {
-                auto slabs = wall_slabs(character, part[0].p, floor, part);
-                boxes.insert(boxes.end(), slabs.begin(), slabs.end());
-            }
-            if (!boxes.empty()) nm::api.world_set_boxes(a.world, boxes.data(), int32_t(boxes.size() / 13));
+            make_world(floor);
             use_ccd(mesh);
             loosen_joints(mesh);
-            log(STR("[RoNDelirium]   {} furniture boxes, {} wall slabs around\n"), furniture, boxes.size() / 13 - furniture);
             log(STR("[RoNDelirium]   floor {:.2f} m below the pelvis{}\n"), part[0].p.z - floor, floor == feet ? STR(" (no trace hit: under the feet)") : STR(""));
             a.started = true;
         }
@@ -1916,6 +2339,16 @@ namespace rondelirium
             }
         }
 
+        // The body gone out of the world Delirium was given: made again around it (not while it hangs loose).
+        if (a.started && !a.loose && cfg.rebuild_world > 0 && a.clock - a.world_t > 0.5
+            && std::hypot(part[0].p.x - a.world_at.x, part[0].p.y - a.world_at.y) > cfg.rebuild_world)
+        {
+            double floor = floor_below(character, part[0].p, a.floor);
+            ++a.worlds;
+            note(a, "world_again");
+            make_world(floor);
+        }
+
         // The shot task, as GTA IV runs it: each bullet starts it or carries it on, and it runs every frame between.
         // Dying where they already lay (killed on the floor): limp, or the dying reaction braced to get up.
         // Dying: the reaction's stagger for its first moment only, then limp. Each bullet restarted it, and a corpse kept
@@ -1927,7 +2360,10 @@ namespace rondelirium
         {
             int hit = a.hit.bone.empty() ? 10 : part_of(a.hit.bone);
             DVec dir = a.hit.dir;
-            if (len(dir) < 1e-3) dir = part[10].p - part[0].p;
+            // No bullet seen (a death the blood and damage hooks missed): the reaction only, no push. The old stand-in,
+            // pelvis to chest, pushed them straight up: Delirium flew off and lost the body in 0.2 s.
+            bool aimed = len(dir) >= 1e-3;
+            if (!aimed) dir = part[10].p - part[0].p;
             dir = dir * (1.0 / len(dir));
             DVec hit_at = len(a.hit.at - part[hit].p) < 0.5 ? a.hit.at : part[hit].p;
             float at[3] = {float(hit_at.x), float(hit_at.y), float(hit_at.z)};
@@ -1936,9 +2372,49 @@ namespace rondelirium
             float left = a.alive ? a.left : 0.0f;
             // (global in the engine: set for each agent's own calls, the dying's lower)
             nm::api.set_shot_body_stiffness(a.alive ? (a.shock || a.shock_pending ? cfg.taser_stiffness : 0.0f) : cfg.dying_stiffness);
-            nm::api.set_shot_force_scale(a.tase_first ? 0.0f : weapon_push(a.hit.weapon) * float(std::max(a.hit.count, 1)) / ENGINE_SHOT_FORCE * cfg.push_scale
-                                         * (cfg.healthy_push + (cfg.weak_push - cfg.healthy_push) * (1.0f - left)));
+            float health_push = cfg.healthy_push + (cfg.weak_push - cfg.healthy_push) * (1.0f - left);
+            // A shotgun blast: each pellet pushes the part it hit, with its own direction (those in the hit part with the
+            // shot). An arm or a leg takes a few at most (2 on a shin, foot, forearm or hand, 3 on a thigh or upper arm);
+            // the rest goes on through the joint, to the pelvis or the chest. The whole blast on the part nearest the
+            // spread's middle threw a shin over the head: offline, 3 pellets on it still did (the foot 0.8-1.5 m up), 2 not.
+            auto pellet_cap = [](int k) { return k == 1 || k == 4 || k == 14 || k == 18 ? 3 : (k >= 2 && k <= 6) || k == 15 || k == 16 || k == 19 || k == 20 ? 2 : 99; };
+            auto limb_root = [](int k) { return k >= 1 && k <= 6 ? 0 : 10; };
+            int with_shot = std::max(a.hit.count, 1);
+            std::vector<std::pair<int, DVec>> extra;  // (part, impulse) beyond the shot
+            float each = weapon_push(a.hit.weapon) * cfg.push_scale * health_push;
+            if (a.hit.pellets.size() > 1)
+            {
+                std::array<int, nm::PARTS> taken{};
+                with_shot = 0;
+                for (const Pellet& x : a.hit.pellets)
+                {
+                    int k = part_of(x.bone);
+                    if (k < 0 || k >= int(nm::PARTS)) k = hit;
+                    DVec pd = len(x.dir) >= 1e-3 ? x.dir * (1.0 / len(x.dir)) : dir;
+                    if (taken[k] >= pellet_cap(k)) { extra.push_back({limb_root(k), pd * each}); continue; }
+                    ++taken[k];
+                    if (k == hit) ++with_shot;
+                    else extra.push_back({k, pd * each});
+                }
+                with_shot = std::max(with_shot, 1);
+            }
+            else if (with_shot > pellet_cap(hit))  // a blast with no pellet list: the cap, the rest through the joint
+            {
+                for (int i = pellet_cap(hit); i < with_shot; ++i) extra.push_back({limb_root(hit), dir * each});
+                with_shot = pellet_cap(hit);
+            }
+            nm::api.set_shot_force_scale(a.tase_first || !aimed ? 0.0f : weapon_push(a.hit.weapon) * float(with_shot) / ENGINE_SHOT_FORCE * cfg.push_scale
+                                         * health_push);
             nm::api.agent_shot(a.agent, a.world, nullptr, hit, at, d, health, shooter);
+            if (!a.tase_first && aimed)
+            {
+                for (auto& [k, imp] : extra)
+                {
+                    float pat[3] = {float(part[k].p.x), float(part[k].p.y), float(part[k].p.z)};
+                    float pim[3] = {float(imp.x), float(imp.y), float(imp.z)};
+                    nm::api.agent_apply_push(a.agent, pat, pim);
+                }
+            }
             // The hand held on the wound this long, not GTA IV's 3 s: where Ready or Not's joint limits keep it off the
             // wound, the arm stayed jammed there, stiff, for the whole stagger.
             if (nm::api.msg_begin(a.agent, "shot") == 0)
@@ -2434,6 +2910,9 @@ namespace rondelirium
         f9_was = f9;
         if (mark_asked.exchange(false)) mark_recent();
         std::erase_if(written, [](const Written& w) { return now_s - w.at > 8.0; });
+        handover_tick(dt);
+        corpse_capsule_tick(dt);
+        census_tick();
         std::erase_if(physical_animation_ramps, [dt](Ramp& r) {
             UObject* c = r.character.Get();
             if (!c || driving(c)) return true;
@@ -2579,6 +3058,8 @@ namespace rondelirium
                     for (const Hit& x : hits) if (len(x.at - mid) < len(best->at - mid)) best = &x;
                     Hit all = *best;
                     all.count = std::min(int(hits.size()), 9);
+                    for (const Hit& x : hits)
+                        if (all.pellets.size() < 9) all.pellets.push_back(Pellet{x.bone, x.at, x.dir});
                     last_hits[ctx.Context] = all;
                 }
                 note_head_hit(ctx.Context, h.bone);

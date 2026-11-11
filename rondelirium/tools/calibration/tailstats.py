@@ -102,7 +102,12 @@ def stats(path):
         if refpose(b, floor): ref_frames.append(round(fr[i]['t'], 2))
         for key in ('ragdoll', 'sim', 'dead'):
             if fr[i][key] != fr[i - 1][key]: flips.append(f"{key}{fr[i - 1][key]}>{fr[i][key]}@{fr[i]['t']:.2f}")
-    out.update(jump=round(jump, 2) if jump is not None else None, snaps=len(snaps), first_snaps=snaps[:3], twitch=twitch, teleports=teleports[:3],
+    # The hand-over into the animation as the player saw it: the biggest one-frame step of any part in the tail's first
+    # 0.35 s (a body handed straight to the animation jumped 0.1-0.6 m in one frame; a blended hand-over moves in steps).
+    step = max((max(math.dist(fr[i - 1]['body'][k][:3], fr[i]['body'][k][:3]) for k in range(21))
+                for i in range(1, len(fr)) if fr[i]['t'] <= 0.35), default=0)
+    out.update(step=round(step, 2),
+               jump=round(jump, 2) if jump is not None else None, snaps=len(snaps), first_snaps=snaps[:3], twitch=twitch, teleports=teleports[:3],
                tpose=tposed, refpose=(len(ref_frames), ref_frames[:1], rec_ref), flags=f"ragdoll {fr[0]['ragdoll']} sim {fr[0]['sim']} dead {fr[0]['dead']}", flips=flips[:4])
     return out
 
@@ -115,7 +120,7 @@ if __name__ == '__main__':
     rows = [stats(p) for p in paths]
     rows.sort(key=lambda r: -((r.get('tpose') is not None) * 100 + len(r.get('teleports', [])) * 10 + r.get('snaps', 0) + (r.get('jump') or 0) * 10))
     for r in rows:
-        print(f"{r['name'][:56]:57}{r['state']:6}{r['why'][:22]:23} jump {r.get('jump')} snaps {r.get('snaps')} twitch {r.get('twitch')} "
+        print(f"{r['name'][:56]:57}{r['state']:6}{r['why'][:22]:23} jump {r.get('jump')} step {r.get('step')} snaps {r.get('snaps')} twitch {r.get('twitch')} "
               f"tpose {r.get('tpose')} refpose(tail frames, first, rec last10) {r.get('refpose')} teleports {r.get('teleports')} {r.get('flags')} {' '.join(r.get('flips', []))}")
         p = os.path.join(sys.argv[1] if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]) else GAME, r['name'])
         if ANIM.get(p): print('      anim:', ' '.join(f'{t:.2f}:{f}' for t, f in ANIM[p][:6]))
